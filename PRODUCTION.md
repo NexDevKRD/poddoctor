@@ -12,7 +12,15 @@ Step-by-step guide to deploying PodDoctor in production with high availability, 
 | Container registry | Any (ghcr, ECR, GCR, ACR) | Private with scanning |
 | Go (build only) | 1.26 | 1.26 |
 
-## Step 1: Build & Push Container Image
+## Step 1: Get the Container Image
+
+Tagged releases (`git tag v0.1.0 && git push --tags`) trigger `.github/workflows/release.yml`, which builds and pushes a multi-arch (`linux/amd64`, `linux/arm64`) image to `ghcr.io/<org>/poddoctor:<version>` and publishes the Helm chart as an OCI artifact to `oci://ghcr.io/<org>/charts` — pull it directly instead of building locally:
+
+```bash
+docker pull ghcr.io/your-org/poddoctor:v0.1.0
+```
+
+To build locally instead (e.g. to test an unreleased change):
 
 ```bash
 git clone https://github.com/chenar/poddoctor.git
@@ -143,7 +151,7 @@ helm upgrade poddoctor charts/poddoctor -n poddoctor-system --reuse-values \
   --set metrics.serviceMonitor.enabled=true
 ```
 
-PodDoctor exposes controller-runtime's standard metrics — reconcile counts/errors/duration and workqueue depth — plus standard Go/process metrics. No custom metrics were added; these are enough to alert on operator health without adding maintenance surface.
+PodDoctor exposes controller-runtime's standard metrics — reconcile counts/errors/duration and workqueue depth — plus standard Go/process metrics, and one business metric: `poddoctor_diagnoses_total{root_cause,confidence}`, a counter incremented on every new diagnosis. It survives `PodDiagnosis` CRs being garbage-collected with their pods, so it's the right thing to alert and trend on, not the CR count.
 
 ```yaml
 apiVersion: monitoring.coreos.com/v1
@@ -177,18 +185,24 @@ spec:
 
         - alert: HighConfidenceCrashLoopDetected
           expr: |
-            kube_customresource_status_condition{
-              group="diagnostics.poddoctor.dev",
-              confidence="High"
-            } > 0
+            increase(poddoctor_diagnoses_total{confidence="High"}[5m]) > 0
           for: 0m
           labels:
             severity: warning
           annotations:
-            summary: "PodDoctor diagnosed a high-confidence failure: {{ $labels.exported_namespace }}/{{ $labels.name }}"
+            summary: "PodDoctor made {{ $value }} new high-confidence diagnosis/diagnoses in the last 5m"
+
+        - alert: OOMKilledRateHigh
+          expr: |
+            increase(poddoctor_diagnoses_total{root_cause="OOMKilled"}[30m]) > 5
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $value }} OOMKilled diagnoses in the last 30m — check for a memory leak or undersized limits"
 ```
 
-`HighConfidenceCrashLoopDetected` depends on `kube-state-metrics`' generic CRD metric support (`kube_customresource_status_*`) being configured for the `poddiagnoses` CRD; enable it via kube-state-metrics' `--custom-resource-state-config` if you want that specific alert.
+Alternatively, for a per-object view: `kubectl get pd -A` or the built-in dashboard (`svc/<release>-dashboard`) show live diagnoses without needing kube-state-metrics' CRD support configured.
 
 ## Step 9: GitOps Integration
 

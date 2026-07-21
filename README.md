@@ -124,6 +124,8 @@ The controller watches Pods cluster-wide (configurable, see below) and reconcile
 - `ImagePullBackOff` / `ErrImagePull`
 - `InvalidImageName`
 
+This applies to **init containers as well as regular containers** — a migration/setup init container stuck looping is diagnosed just like the main container. Each failing container in a pod gets its own `PodDiagnosis` (see [Custom Resource](#custom-resource)), so a sidecar crash-looping alongside a healthy main container is still caught.
+
 Each restart episode is diagnosed once (deduped on restart count) and re-diagnosed only when the restart count advances — so a pod stuck looping doesn't spam reconciles or rewrite its `PodDiagnosis` every resync.
 
 ## Root Causes Detected
@@ -136,7 +138,7 @@ Each restart episode is diagnosed once (deduped on restart count) and re-diagnos
 | `SegFault` | Exit 139 (SIGSEGV) | High |
 | `SignalKilled` | Exit 143 (SIGTERM) | Medium |
 | `ProbeFailure` | Recent `Unhealthy`/"probe failed" Event alongside a kill | High |
-| `RecentRolloutRegression` | Pod started within the rollout-correlation window of a new ReplicaSet | Medium |
+| `RecentRolloutRegression` | Pod started within the rollout-correlation window of a new ReplicaSet (Deployments) or ControllerRevision (StatefulSets/DaemonSets) | Medium |
 | `ApplicationError` | Any other non-zero exit | Medium |
 | `Unknown` | No matching signature | Low |
 
@@ -146,13 +148,13 @@ Rollout timing is layered onto whichever primary cause is found (e.g. "OOMKilled
 
 ## Custom Resource
 
-`PodDiagnosis` objects are **created and owned by the operator** — one per crash-looping pod, named after the pod, garbage-collected automatically when the pod is deleted (via `ownerReferences`). You don't write these; you read them.
+`PodDiagnosis` objects are **created and owned by the operator** — one per crash-looping *container* (named `<pod>-<container>`, so a pod with two failing containers gets two objects), garbage-collected automatically when the pod is deleted (via `ownerReferences`). You don't write these; you read them.
 
 ```yaml
 apiVersion: diagnostics.poddoctor.dev/v1alpha1
 kind: PodDiagnosis
 metadata:
-  name: payments-api-7d4b8f6c9-x2k4p
+  name: payments-api-7d4b8f6c9-x2k4p-app
   namespace: platform
   ownerReferences:
     - apiVersion: v1
@@ -185,8 +187,8 @@ status:
 
 ```
 $ kubectl get pd -A
-NAMESPACE   NAME                             POD                              ROOT CAUSE      CONFIDENCE   RESTARTS   AGE
-platform    payments-api-7d4b8f6c9-x2k4p     payments-api-7d4b8f6c9-x2k4p     OOMKilled       High         4          12m
+NAMESPACE   NAME                                 POD                              ROOT CAUSE      CONFIDENCE   RESTARTS   AGE
+platform    payments-api-7d4b8f6c9-x2k4p-app     payments-api-7d4b8f6c9-x2k4p     OOMKilled       High         4          12m
 ```
 
 Short name: `pd`
@@ -203,6 +205,8 @@ Short name: `pd`
 | `diagnosis.rolloutWindow` | `10m` | How soon after a rollout a pod start still counts as rollout-correlated |
 | `metrics.serviceMonitor.enabled` | `false` | Create a `ServiceMonitor` for the Prometheus Operator |
 | `dashboard.enabled` | `true` | Serve the read-only HTML dashboard (`svc/<release>-dashboard`) |
+| `notifications.webhookURL` | `""` (disabled) | POST a notification for every new diagnosis — generic JSON or a Slack incoming webhook |
+| `notifications.webhookFormat` | `generic` | `generic` (JSON fields) or `slack` (Slack message text) |
 | `podDisruptionBudget.enabled` | `false` | Create a PDB (recommended once `replicaCount > 1`) |
 | `installCRDs` | `true` | Render the CRD as part of this release (upgradable; `helm.sh/resource-policy: keep` protects it from `helm uninstall`) |
 
@@ -212,7 +216,11 @@ Full list in [`charts/poddoctor/values.yaml`](charts/poddoctor/values.yaml).
 
 ## Monitoring
 
-PodDoctor exposes controller-runtime's standard metrics (reconcile count/errors/duration, workqueue depth) on `:8080/metrics` — no custom metrics needed. See [`PRODUCTION.md`](PRODUCTION.md) for ready-to-use `PrometheusRule` alerts.
+PodDoctor exposes controller-runtime's standard metrics (reconcile count/errors/duration, workqueue depth) plus its own `poddoctor_diagnoses_total{root_cause,confidence}` counter on `:8080/metrics` — a durable trend of what's been failing even after the underlying `PodDiagnosis` CRs are garbage-collected with their pods. See [`PRODUCTION.md`](PRODUCTION.md) for ready-to-use `PrometheusRule` alerts.
+
+## Notifications
+
+Set `notifications.webhookURL` (Helm) or `--webhook-url` (flag) to get a best-effort POST for every new diagnosis — a generic JSON body by default, or Slack-formatted text with `notifications.webhookFormat=slack` / `--webhook-format=slack` pointed at a Slack incoming webhook URL. Notification failures are logged, not retried, and never fail the diagnosis itself.
 
 ---
 
@@ -262,8 +270,8 @@ See [`TESTING.md`](TESTING.md) for the full test matrix and [`PRODUCTION.md`](PR
 | Property | Detail |
 |----------|--------|
 | Container | Distroless, non-root (UID 65532), read-only fs, drop ALL caps, seccomp `RuntimeDefault` |
-| RBAC | No `secrets` access at all. Read-only on Pods/Events/ReplicaSets/Deployments; write access limited to its own `poddiagnoses` CRD and Events |
-| Network | Only egress is to the Kubernetes API server |
+| RBAC | No `secrets` access at all. Read-only on Pods/Events/ReplicaSets/Deployments/ControllerRevisions; write access limited to its own `poddiagnoses` CRD and Events |
+| Network | Egress is to the Kubernetes API server only, unless `notifications.webhookURL` is set, which adds egress to that one endpoint |
 | HA | `leaderElection.enabled=true` (default), `replicaCount ≥ 2` |
 | Diagnosis engine | Fully offline, rule-based — no external API calls, works air-gapped |
 
@@ -279,6 +287,7 @@ See [`TESTING.md`](TESTING.md) for the full test matrix and [`PRODUCTION.md`](PR
 | Kubernetes client-go | 0.36.0 |
 | Kubernetes | 1.28+ |
 | Helm | 3.12+ |
+| Container image | `linux/amd64`, `linux/arm64` — published to `ghcr.io/<org>/poddoctor` on tagged releases |
 
 ---
 
