@@ -54,3 +54,59 @@ func oomKilledPod() *corev1.Pod {
 	}
 }
 
+func newReconciler(t *testing.T, scheme *runtime.Scheme, initObjs ...client.Object) *PodDiagnosisReconciler {
+	t.Helper()
+	builder := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&diagv1alpha1.PodDiagnosis{}).
+		WithObjects(initObjs...)
+	c := builder.Build()
+
+	return &PodDiagnosisReconciler{
+		Client:        c,
+		Scheme:        scheme,
+		ClientSet:     fakeclientset.NewSimpleClientset(),
+		Recorder:      events.NewFakeRecorder(10),
+		LogTailLines:  50,
+		RolloutWindow: 10 * time.Minute,
+	}
+}
+
+func TestReconcile_DiagnosesOOMKilledCrashLoop(t *testing.T) {
+	scheme := newTestScheme(t)
+	pod := oomKilledPod()
+	r := newReconciler(t, scheme, pod)
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+
+	res, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if res.RequeueAfter != diagnosisRequeueInterval {
+		t.Fatalf("expected requeue after %v, got %v", diagnosisRequeueInterval, res.RequeueAfter)
+	}
+
+	var diag diagv1alpha1.PodDiagnosis
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &diag); err != nil {
+		t.Fatalf("expected PodDiagnosis to be created: %v", err)
+	}
+	if diag.Status.RootCause != diagv1alpha1.RootCauseOOMKilled {
+		t.Fatalf("RootCause = %s, want %s", diag.Status.RootCause, diagv1alpha1.RootCauseOOMKilled)
+	}
+	if diag.Status.Phase != "Diagnosed" {
+		t.Fatalf("Phase = %s, want Diagnosed", diag.Status.Phase)
+	}
+	if diag.Status.RestartCount != 1 {
+		t.Fatalf("RestartCount = %d, want 1", diag.Status.RestartCount)
+	}
+	if diag.OwnerReferences == nil || len(diag.OwnerReferences) != 1 || diag.OwnerReferences[0].Name != pod.Name {
+		t.Fatalf("expected owner reference to pod, got %+v", diag.OwnerReferences)
+	}
+}
+
+func TestReconcile_SkipsHealthyPod(t *testing.T) {
+	scheme := newTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "healthy", Namespace: "default"},
