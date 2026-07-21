@@ -11,6 +11,7 @@ Step-by-step guide to deploying PodDoctor in production with high availability, 
 | kubectl | 1.28 | Latest |
 | Container registry | Any (ghcr, ECR, GCR, ACR) | Private with scanning |
 | Go (build only) | 1.26 | 1.26 |
+| Node.js (build only, for the dashboard SPA) | 24 | 24 |
 
 ## Step 1: Get the Container Image
 

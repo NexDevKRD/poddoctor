@@ -2,21 +2,26 @@
 
 ## Development setup
 
+Requires Go 1.26+ and Node.js 24+ (the dashboard SPA in `web/` is embedded into both binaries via `go:embed`, so it has to exist before Go code even compiles — `task build`/`test`/`lint` build it automatically).
+
 ```bash
 git clone https://github.com/chenar/poddoctor.git
 cd poddoctor
-task test        # unit tests
+task test        # unit tests (builds the dashboard SPA first)
 task lint        # golangci-lint
 task fmt         # gofmt + go vet
 ```
 
 Full local workflow (kind cluster, build, deploy, trigger real failures) is `task demo` — see [`README.md`](README.md#development) and [`TESTING.md`](TESTING.md).
 
+Iterating on the dashboard UI itself: `cd web && npm run dev` for hot reload, or `npm run build` and reload the Go server. See `web/src/App.tsx`.
+
 ## Before opening a PR
 
 - `task fmt lint test` all pass.
 - New behavior in `internal/diagnosis` or `internal/controller` has a table-driven test alongside it (see existing `_test.go` files for the pattern).
 - If you changed `api/v1alpha1/poddiagnosis_types.go`, regenerate deepcopy code: `task generate`, and keep `config/crd/bases/*.yaml` and `charts/poddoctor/templates/crd.yaml` in sync (`task crd:diff` checks this in CI).
+- If you changed `web/`, run `npm run build` (or `task web:build`) so `internal/webui/dist` reflects it before testing the Go side.
 - Keep PRs scoped to one change; unrelated cleanup makes review harder.
 
 ## Reporting bugs / requesting features

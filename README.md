@@ -271,19 +271,25 @@ It doesn't touch the Kubernetes API at all (no RBAC needed) — it's a plain HTT
 
 ## Development
 
+Requires Go 1.26+ and **Node.js 24+** — the dashboard (`web/`) is a Vite/React SPA embedded into both binaries via `go:embed`, so it has to be built before `go build`/`go test`/`go vet` will even compile. `task build`/`test`/`lint`/`run` all pull `web:build` in automatically (skipped if `web/` hasn't changed); everything below works without thinking about it as long as Node is installed.
+
 ```bash
-task build          # Build operator binary
-task test            # Run all unit tests
-task test:e2e         # Run E2E suite against a deployed operator
-task docker:build     # Build container image
-task helm:lint         # Lint the Helm chart
-task helm:template     # Render the Helm chart locally
-task helm:install      # helm upgrade --install into current cluster
-task crd:diff           # Fail if the Helm CRD template drifted from config/crd/bases
-task demo               # One command: kind cluster → build → helm install → real crash loops → results
-task demo:clean          # Tear down the demo kind cluster
-task generate             # Regenerate deepcopy methods via controller-gen
+task web:build        # Build the dashboard SPA into internal/webui/dist
+task build             # Build operator binary
+task build:hub          # Build fleet hub binary
+task test                # Run all unit tests
+task test:e2e              # Run E2E suite against a deployed operator
+task docker:build            # Build container image (Dockerfile has its own Node build stage)
+task helm:lint                 # Lint the Helm chart
+task helm:template              # Render the Helm chart locally
+task helm:install                 # helm upgrade --install into current cluster
+task crd:diff                       # Fail if the Helm CRD template drifted from config/crd/bases
+task demo                             # One command: kind cluster → build → helm install → real crash loops → results
+task demo:clean                         # Tear down the demo kind cluster
+task generate                             # Regenerate deepcopy methods via controller-gen
 ```
+
+Frontend-only iteration: `cd web && npm run dev` (Vite dev server with hot reload) — point it at a running operator/hub's `/api/diagnoses` via Vite's proxy config if you need live data, or just build fixtures into `useDiagnoses.ts` while iterating on layout.
 
 See [`TESTING.md`](TESTING.md) for the full test matrix and [`PRODUCTION.md`](PRODUCTION.md) for the production deployment guide.
 
@@ -296,22 +302,25 @@ See [`TESTING.md`](TESTING.md) for the full test matrix and [`PRODUCTION.md`](PR
 ├── cmd/main.go               Operator entrypoint (manager, leader election, flags)
 ├── cmd/hub/                   Fleet hub entrypoint (see charts/poddoctor-hub)
 ├── internal/diagnosis/       Pure rule-based root-cause engine (unit tested, no cluster deps)
-├── internal/dashboard/       Small read-only HTML page over PodDiagnosis (stdlib html/template only)
+├── internal/dashboard/       JSON API (/api/diagnoses) + serves the dashboard SPA
 ├── internal/controller/      Reconciler: watches Pods, gathers evidence, writes PodDiagnosis
 ├── internal/notify/           Webhook sending + per-namespace routing
 ├── internal/alertgroup/        Storm dedup for repeated same-cause diagnoses
 ├── internal/metrics/            poddoctor_diagnoses_total registration
-├── internal/hub/                  Fleet hub: Postgres store + HTTP API/dashboard
-├── config/crd/                CRD manifest (kustomize path)
-├── config/rbac/                ServiceAccount, ClusterRole, ClusterRoleBinding
-├── config/manager/              Deployment (kustomize path)
-├── config/samples/               Demo pods that reliably trigger each root cause
-├── charts/poddoctor/              Helm chart (recommended deployment method)
-├── charts/poddoctor-hub/            Helm chart for the optional fleet hub
-├── hack/                            E2E test script, boilerplate
-├── Dockerfile                        Multi-stage, distroless, non-root (operator)
-├── Dockerfile.hub                     Same, for the fleet hub
-├── Taskfile.yaml                      All automation
+├── internal/severity/             Root-cause → badge-severity mapping, shared by both dashboards
+├── internal/webui/                  go:embed wrapper around web/dist (built SPA)
+├── internal/hub/                      Fleet hub: Postgres store + HTTP API + dashboard SPA
+├── web/                                  Dashboard SPA (React + Vite + TypeScript) — one frontend, both binaries
+├── config/crd/                            CRD manifest (kustomize path)
+├── config/rbac/                            ServiceAccount, ClusterRole, ClusterRoleBinding
+├── config/manager/                          Deployment (kustomize path)
+├── config/samples/                           Demo pods that reliably trigger each root cause
+├── charts/poddoctor/                          Helm chart (recommended deployment method)
+├── charts/poddoctor-hub/                       Helm chart for the optional fleet hub
+├── hack/                                        E2E test script, boilerplate
+├── Dockerfile                                    Multi-stage: Node build stage (SPA) → Go build stage → distroless
+├── Dockerfile.hub                                 Same, for the fleet hub
+├── Taskfile.yaml                                  All automation
 └── go.mod
 ```
 
