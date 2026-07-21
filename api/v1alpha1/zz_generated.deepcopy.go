@@ -60,3 +60,66 @@ func (in *PodDiagnosisList) DeepCopyInto(out *PodDiagnosisList) {
 			in.Items[i].DeepCopyInto(&l[i])
 		}
 		out.Items = l
+	}
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new PodDiagnosisList.
+func (in *PodDiagnosisList) DeepCopy() *PodDiagnosisList {
+	if in == nil {
+		return nil
+	}
+	out := new(PodDiagnosisList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject is a deepcopy function, copying the receiver, creating a new runtime.Object.
+func (in *PodDiagnosisList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *PodDiagnosisSpec) DeepCopyInto(out *PodDiagnosisSpec) {
+	*out = *in
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new PodDiagnosisSpec.
+func (in *PodDiagnosisSpec) DeepCopy() *PodDiagnosisSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(PodDiagnosisSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *PodDiagnosisStatus) DeepCopyInto(out *PodDiagnosisStatus) {
+	*out = *in
+	if in.ExitCode != nil {
+		exitCode := *in.ExitCode
+		out.ExitCode = &exitCode
+	}
+	if in.RecentEvents != nil {
+		l := make([]EvidenceEvent, len(in.RecentEvents))
+		for i := range in.RecentEvents {
+			in.RecentEvents[i].DeepCopyInto(&l[i])
+		}
+		out.RecentEvents = l
+	}
+	in.FirstObserved.DeepCopyInto(&out.FirstObserved)
+	in.LastObserved.DeepCopyInto(&out.LastObserved)
+}
+
+// DeepCopy is a deepcopy function, copying the receiver, creating a new PodDiagnosisStatus.
+func (in *PodDiagnosisStatus) DeepCopy() *PodDiagnosisStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(PodDiagnosisStatus)
+	in.DeepCopyInto(out)
+	return out
+}
