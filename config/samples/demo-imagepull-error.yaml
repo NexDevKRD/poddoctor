@@ -1,0 +1,14 @@
+# Demo: an image reference that will never resolve. PodDoctor should
+# diagnose this as ImagePullError with High confidence as soon as the
+# kubelet reports ImagePullBackOff/ErrImagePull.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-image-pull-error
+  labels:
+    app.kubernetes.io/part-of: poddoctor-demo
+spec:
+  restartPolicy: Always
+  containers:
+    - name: app
+      image: ghcr.io/chenar/this-image-does-not-exist:v0.0.0-does-not-exist
