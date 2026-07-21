@@ -110,3 +110,59 @@ func TestReconcile_SkipsHealthyPod(t *testing.T) {
 	scheme := newTestScheme(t)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "healthy", Namespace: "default"},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "app", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+		},
+	}
+	r := newReconciler(t, scheme, pod)
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+	res, err := r.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue for healthy pod, got %+v", res)
+	}
+
+	var diag diagv1alpha1.PodDiagnosis
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &diag); err == nil {
+		t.Fatalf("expected no PodDiagnosis for healthy pod")
+	}
+}
+
+func TestReconcile_DedupesSameEpisode(t *testing.T) {
+	scheme := newTestScheme(t)
+	pod := oomKilledPod()
+	r := newReconciler(t, scheme, pod)
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+
+	var first diagv1alpha1.PodDiagnosis
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &first); err != nil {
+		t.Fatalf("get after first reconcile: %v", err)
+	}
+	firstObserved := first.Status.FirstObserved
+
+	// Same restart count -> second reconcile should be a cheap no-op (dedup),
+	// leaving FirstObserved untouched.
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+
+	var second diagv1alpha1.PodDiagnosis
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &second); err != nil {
+		t.Fatalf("get after second reconcile: %v", err)
+	}
+	if !second.Status.FirstObserved.Time.Equal(firstObserved.Time) {
+		t.Fatalf("FirstObserved changed on dedup: %v -> %v", firstObserved, second.Status.FirstObserved)
+	}
+}
