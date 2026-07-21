@@ -70,3 +70,75 @@ tasks:
       - kubectl apply -k config/crd
 
   uninstall:
+    desc: Remove the CRD from the current cluster (kustomize path)
+    cmds:
+      - kubectl delete -k config/crd
+
+  deploy:
+    desc: Deploy the operator to the current cluster (kustomize path)
+    cmds:
+      - cd config/manager && kustomize edit set image controller={{.IMG}}
+      - kubectl apply -k config/default
+
+  undeploy:
+    desc: Remove the operator from the current cluster (kustomize path)
+    cmds:
+      - kubectl delete -k config/default
+
+  run:
+    desc: Run operator locally against current cluster (dev mode)
+    cmds:
+      - go run ./cmd/main.go --leader-elect=false
+
+  # ─── Helm deployment (recommended for production) ─────────────────────────
+
+  helm:lint:
+    desc: Lint the Helm chart
+    cmds:
+      - helm lint charts/poddoctor
+
+  helm:template:
+    desc: Render the Helm chart locally
+    cmds:
+      - helm template {{.RELEASE}} charts/poddoctor
+
+  helm:install:
+    desc: Install PodDoctor via Helm into the current cluster
+    cmds:
+      - helm upgrade --install {{.RELEASE}} charts/poddoctor --namespace {{.NAMESPACE}} --create-namespace --set image.repository={{.IMG}} --wait
+
+  helm:uninstall:
+    desc: Remove the Helm release (CRD is kept — see values.yaml installCRDs)
+    cmds:
+      - helm uninstall {{.RELEASE}} --namespace {{.NAMESPACE}}
+
+  # ─── Code Generation ────────────────────────────────────────────────────────
+  # No local controller-gen install required: runs pinned via `go run`.
+
+  generate:
+    desc: Regenerate deepcopy methods (CRD schema is hand-maintained, see crd:diff)
+    cmds:
+      - go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.19.0 object:headerFile="hack/boilerplate.go.txt" paths="./..."
+
+  # ─── Demo ───────────────────────────────────────────────────────────────────
+
+  demo:
+    desc: "One command: kind cluster → build → helm install → trigger real failures → show diagnoses"
+    cmds:
+      - task: docker:build
+      - kind create cluster --name {{.CLUSTER_NAME}} 2>/dev/null || true
+      - kind load docker-image {{.IMG}} --name {{.CLUSTER_NAME}}
+      - helm upgrade --install {{.RELEASE}} charts/poddoctor --namespace {{.NAMESPACE}} --create-namespace --kube-context kind-{{.CLUSTER_NAME}} --set image.repository={{.IMG}} --set image.pullPolicy=IfNotPresent --wait
+      - kubectl apply -f config/samples/ --context kind-{{.CLUSTER_NAME}}
+      - echo "Waiting for failures to be diagnosed..."
+      - sleep 45
+      - echo ""
+      - echo "=== Diagnoses ==="
+      - kubectl get pd --context kind-{{.CLUSTER_NAME}}
+      - echo ""
+      - echo "Cleanup → task demo:clean"
+
+  demo:clean:
+    desc: Tear down the demo kind cluster
+    cmds:
+      - kind delete cluster --name {{.CLUSTER_NAME}}
