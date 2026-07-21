@@ -1,0 +1,72 @@
+version: "3"
+
+vars:
+  IMG: ghcr.io/chenar/poddoctor:latest
+  CLUSTER_NAME: poddoctor
+  RELEASE: poddoctor
+  NAMESPACE: poddoctor-system
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # ─── Build ──────────────────────────────────────────────────────────────────
+
+  build:
+    desc: Build operator binary
+    cmds:
+      - CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/manager ./cmd/main.go
+
+  # ─── Test ───────────────────────────────────────────────────────────────────
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./... -coverprofile=cover.out -v
+
+  test:e2e:
+    desc: Run E2E tests against current cluster (operator must already be deployed)
+    cmds:
+      - ./hack/e2e-test.sh
+
+  lint:
+    desc: Run linter
+    cmds:
+      - golangci-lint run ./...
+
+  fmt:
+    desc: Format and vet
+    cmds:
+      - go fmt ./...
+      - go vet ./...
+
+  crd:diff:
+    desc: Fail if the Helm CRD template has drifted from the kustomize CRD base
+    cmds:
+      - >
+        diff <(sed -n '/^spec:/,$p' config/crd/bases/diagnostics.poddoctor.dev_poddiagnoses.yaml)
+             <(sed -n '/^spec:/,$p' charts/poddoctor/templates/crd.yaml | sed '/{{- end }}/d')
+        && echo "CRD spec in sync"
+
+  # ─── Container ──────────────────────────────────────────────────────────────
+
+  docker:build:
+    desc: Build container image
+    cmds:
+      - docker build -t {{.IMG}} .
+
+  docker:push:
+    desc: Push container image to registry
+    cmds:
+      - docker push {{.IMG}}
+
+  # ─── Kustomize (GitOps) deployment ────────────────────────────────────────
+
+  install:
+    desc: Install the CRD into the current cluster (kustomize path)
+    cmds:
+      - kubectl apply -k config/crd
+
+  uninstall:
