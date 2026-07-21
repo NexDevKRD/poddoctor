@@ -49,14 +49,14 @@ echo ""
 
 echo "--- Test 1: OOMKilled pod is diagnosed as OOMKilled ---"
 kubectl apply -f config/samples/demo-oomkilled.yaml
-if wait_for_diagnosis demo-oomkilled 120; then
-  ROOTCAUSE=$(kubectl get pd demo-oomkilled -o jsonpath='{.status.rootCause}')
+if wait_for_diagnosis demo-oomkilled-app 120; then
+  ROOTCAUSE=$(kubectl get pd demo-oomkilled-app -o jsonpath='{.status.rootCause}')
   assert_eq "demo-oomkilled root cause" "OOMKilled" "$ROOTCAUSE"
 
-  CONFIDENCE=$(kubectl get pd demo-oomkilled -o jsonpath='{.status.confidence}')
+  CONFIDENCE=$(kubectl get pd demo-oomkilled-app -o jsonpath='{.status.confidence}')
   assert_not_empty "demo-oomkilled has confidence" "$CONFIDENCE"
 
-  SUMMARY=$(kubectl get pd demo-oomkilled -o jsonpath='{.status.summary}')
+  SUMMARY=$(kubectl get pd demo-oomkilled-app -o jsonpath='{.status.summary}')
   assert_not_empty "demo-oomkilled has summary" "$SUMMARY"
 else
   echo "FAIL: demo-oomkilled was never diagnosed within timeout"
@@ -66,8 +66,8 @@ echo ""
 
 echo "--- Test 2: bad image ref is diagnosed as ImagePullError ---"
 kubectl apply -f config/samples/demo-imagepull-error.yaml
-if wait_for_diagnosis demo-image-pull-error 60; then
-  ROOTCAUSE=$(kubectl get pd demo-image-pull-error -o jsonpath='{.status.rootCause}')
+if wait_for_diagnosis demo-image-pull-error-app 60; then
+  ROOTCAUSE=$(kubectl get pd demo-image-pull-error-app -o jsonpath='{.status.rootCause}')
   assert_eq "demo-image-pull-error root cause" "ImagePullError" "$ROOTCAUSE"
 else
   echo "FAIL: demo-image-pull-error was never diagnosed within timeout"
@@ -77,8 +77,8 @@ echo ""
 
 echo "--- Test 3: bad command is diagnosed as BadCommand ---"
 kubectl apply -f config/samples/demo-bad-command.yaml
-if wait_for_diagnosis demo-bad-command 90; then
-  ROOTCAUSE=$(kubectl get pd demo-bad-command -o jsonpath='{.status.rootCause}')
+if wait_for_diagnosis demo-bad-command-app 90; then
+  ROOTCAUSE=$(kubectl get pd demo-bad-command-app -o jsonpath='{.status.rootCause}')
   assert_eq "demo-bad-command root cause" "BadCommand" "$ROOTCAUSE"
 else
   echo "FAIL: demo-bad-command was never diagnosed within timeout"
@@ -87,7 +87,7 @@ fi
 echo ""
 
 echo "--- Test 4: PodDiagnosis is owned by the Pod (garbage collected with it) ---"
-OWNER_KIND=$(kubectl get pd demo-oomkilled -o jsonpath='{.metadata.ownerReferences[0].kind}')
+OWNER_KIND=$(kubectl get pd demo-oomkilled-app -o jsonpath='{.metadata.ownerReferences[0].kind}')
 assert_eq "demo-oomkilled owned by Pod" "Pod" "$OWNER_KIND"
 echo ""
 
@@ -95,7 +95,7 @@ echo "--- Test 5: kubectl short name and printer columns work ---"
 kubectl get pd > /dev/null 2>&1
 assert_eq "kubectl get pd works" "0" "$?"
 
-OUTPUT=$(kubectl get pd demo-oomkilled --no-headers)
+OUTPUT=$(kubectl get pd demo-oomkilled-app --no-headers)
 echo "$OUTPUT" | grep -q "OOMKilled" && echo "PASS: Root Cause column visible" && PASS=$((PASS+1)) || { echo "FAIL: Root Cause column not visible"; FAIL=$((FAIL+1)); }
 echo ""
 
