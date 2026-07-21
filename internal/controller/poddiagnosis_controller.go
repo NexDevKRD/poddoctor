@@ -242,3 +242,125 @@ func (r *PodDiagnosisReconciler) logTail(ctx context.Context, pod *corev1.Pod, c
 	tail := r.LogTailLines
 	if tail <= 0 {
 		tail = 50
+	}
+
+	req := r.ClientSet.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container: container,
+		Previous:  true,
+		TailLines: &tail,
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		logger.V(1).Info("could not fetch previous logs", "pod", pod.Name, "container", container, "error", err.Error())
+		return ""
+	}
+	defer func() { _ = stream.Close() }()
+
+	const maxBytes = 8192
+	buf := make([]byte, maxBytes)
+	n, readErr := io.ReadFull(stream, buf)
+	if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+		logger.V(1).Info("error reading previous logs", "pod", pod.Name, "container", container, "error", readErr.Error())
+	}
+
+	text := string(buf[:n])
+	const maxLen = 4000
+	if len(text) > maxLen {
+		text = text[len(text)-maxLen:]
+	}
+	return text
+}
+
+// rolloutContext reports whether the pod started shortly after its owning
+// Deployment rolled out a new ReplicaSet revision — a strong hint that a
+// recent deploy introduced the failure.
+func (r *PodDiagnosisReconciler) rolloutContext(ctx context.Context, pod *corev1.Pod) (bool, string) {
+	rsRef := findOwner(pod.OwnerReferences, "ReplicaSet")
+	if rsRef == nil {
+		return false, ""
+	}
+
+	var rs appsv1.ReplicaSet
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: rsRef.Name}, &rs); err != nil {
+		return false, ""
+	}
+
+	window := r.RolloutWindow
+	if window <= 0 {
+		window = 10 * time.Minute
+	}
+	if pod.CreationTimestamp.After(rs.CreationTimestamp.Add(window)) {
+		return false, ""
+	}
+
+	revision := rs.Annotations["deployment.kubernetes.io/revision"]
+	elapsed := pod.CreationTimestamp.Sub(rs.CreationTimestamp.Time).Round(time.Second)
+
+	deployRef := findOwner(rs.OwnerReferences, "Deployment")
+	if deployRef == nil {
+		return true, fmt.Sprintf("pod started %s after replicaset %q (revision %s) was created", elapsed, rs.Name, revision)
+	}
+	return true, fmt.Sprintf("pod started %s after deployment %q rolled out replicaset %q (revision %s)", elapsed, deployRef.Name, rs.Name, revision)
+}
+
+func findOwner(refs []metav1.OwnerReference, kind string) *metav1.OwnerReference {
+	for i := range refs {
+		if refs[i].Kind == kind {
+			return &refs[i]
+		}
+	}
+	return nil
+}
+
+func findFailingContainer(statuses []corev1.ContainerStatus) (corev1.ContainerStatus, bool) {
+	for _, cs := range statuses {
+		if cs.State.Waiting != nil && triggerReasons[cs.State.Waiting.Reason] {
+			return cs, true
+		}
+	}
+	return corev1.ContainerStatus{}, false
+}
+
+func terminationReasonOf(cs corev1.ContainerStatus) string {
+	if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+		return cs.State.Waiting.Reason
+	}
+	if cs.LastTerminationState.Terminated != nil {
+		return cs.LastTerminationState.Terminated.Reason
+	}
+	return ""
+}
+
+func exitCodePtr(cs corev1.ContainerStatus) *int32 {
+	if cs.LastTerminationState.Terminated == nil {
+		return nil
+	}
+	code := cs.LastTerminationState.Terminated.ExitCode
+	return &code
+}
+
+func failingPodPredicate() predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		pod, ok := obj.(*corev1.Pod)
+		if !ok {
+			return false
+		}
+		_, found := findFailingContainer(pod.Status.ContainerStatuses)
+		return found
+	})
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *PodDiagnosisReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.LogTailLines <= 0 {
+		r.LogTailLines = 50
+	}
+	if r.RolloutWindow <= 0 {
+		r.RolloutWindow = 10 * time.Minute
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		Named("poddiagnosis").
+		For(&corev1.Pod{}, builder.WithPredicates(failingPodPredicate())).
+		Owns(&diagv1alpha1.PodDiagnosis{}).
+		Complete(r)
+}
