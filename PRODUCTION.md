@@ -252,3 +252,130 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: poddoctor-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+Add a custom health check to `argocd-cm` so PodDoctor's own Deployment health reflects correctly (standard Deployment health check already covers this — no custom Lua needed, since PodDiagnosis objects are outputs, not something ArgoCD manages).
+
+## Step 10: Multi-Cluster Deployment
+
+```
+┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
+│  Dev Cluster       │     │  Staging Cluster   │     │  Production        │
+│  PodDoctor ✓       │     │  PodDoctor ✓       │     │  PodDoctor ✓        │
+└───────────────────┘     └────────────────────┘     └───────────────────┘
+         │                          │                          │
+         └──────────────────────────┼──────────────────────────┘
+                                     │
+                            ┌────────▼────────┐
+                            │   Git Repo      │
+                            │  (Helm values   │
+                            │  per cluster)   │
+                            └─────────────────┘
+```
+
+Same chart everywhere, per-cluster `values-<env>.yaml` overrides (image tag, replica count, watchNamespace). Each cluster diagnoses its own failures independently — PodDoctor never talks cross-cluster.
+
+## Step 11: Backup & Recovery
+
+The operator is stateless — all state lives in the `PodDiagnosis` CRs themselves, which etcd already backs up as part of normal cluster backup:
+
+```bash
+# If the operator dies, just redeploy — no state to restore
+helm upgrade --install poddoctor charts/poddoctor -n poddoctor-system --reuse-values
+
+# Existing PodDiagnosis objects are untouched; new failures get diagnosed
+# as soon as the new pod starts reconciling.
+```
+
+## Step 12: Upgrade Procedure
+
+```bash
+docker build -t ghcr.io/your-org/poddoctor:v0.2.0 .
+docker push ghcr.io/your-org/poddoctor:v0.2.0
+
+helm upgrade poddoctor charts/poddoctor -n poddoctor-system \
+  --reuse-values --set image.tag=v0.2.0 --wait
+
+kubectl -n poddoctor-system rollout status deployment/poddoctor
+```
+
+If the new version changes the CRD schema, `installCRDs: true` (default) means `helm upgrade` applies it automatically — Helm diffs and patches CRDs on upgrade the same as any other templated resource (this only applies to CRDs rendered from `templates/`, which is why this chart deliberately does *not* use Helm's separate `crds/` directory convention).
+
+## Security Checklist
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Container runs as non-root | ✅ | UID 65532 |
+| Read-only filesystem | ✅ | `readOnlyRootFilesystem: true` |
+| No privilege escalation | ✅ | `allowPrivilegeEscalation: false` |
+| Capabilities dropped | ✅ | `drop: ALL` |
+| Seccomp profile | ✅ | `RuntimeDefault` |
+| Distroless base image | ✅ | `gcr.io/distroless/static:nonroot` |
+| No secrets access | ✅ | RBAC grants no `secrets` verbs at all |
+| RBAC is read-mostly | ✅ | Only write access is to its own `poddiagnoses` CRD + Events |
+| No network egress (except API server) | ✅ | NetworkPolicy applied (Step 6) |
+| Pod Security Standards: restricted | ✅ | Passes `restricted` profile |
+| Image signed (optional) | ⬜ | Add cosign in CI |
+| SBOM generated (optional) | ⬜ | Add syft in CI |
+| Vulnerability scanned | ⬜ | Add trivy scan in CI |
+
+PodDoctor reads Pod logs (`pods/log`) and Kubernetes Events cluster-wide — this is log/metadata read access, not `secrets` or `exec`. If your threat model treats crash logs as sensitive (they can contain leaked credentials from misconfigured apps), restrict `watchNamespace` (Step 5) rather than relying on RBAC alone, since the ClusterRole itself doesn't scope by namespace.
+
+## Troubleshooting
+
+### Operator Not Starting
+
+```bash
+kubectl -n poddoctor-system logs deployment/poddoctor
+kubectl -n poddoctor-system describe pod -l app.kubernetes.io/name=poddoctor
+```
+
+### A Known Crash Loop Isn't Getting a PodDiagnosis
+
+```bash
+# Confirm the container status actually shows a trigger reason
+kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[*].state.waiting.reason}'
+# Must be one of: CrashLoopBackOff, ImagePullBackOff, ErrImagePull, InvalidImageName
+
+# Check the operator's own logs for that pod name
+kubectl -n poddoctor-system logs deployment/poddoctor | grep <pod-name>
+
+# Confirm RBAC allows it to read logs/events for that namespace
+kubectl auth can-i get pods/log --subresource=log \
+  --as=system:serviceaccount:poddoctor-system:poddoctor
+```
+
+### CRD Not Found
+
+```bash
+kubectl get crd poddiagnoses.diagnostics.poddoctor.dev
+# If missing (e.g. installCRDs was set to false):
+kubectl apply -f charts/poddoctor/templates/crd.yaml
+```
+
+### RBAC Permission Denied
+
+```bash
+kubectl auth can-i update poddiagnoses/status \
+  --as=system:serviceaccount:poddoctor-system:poddoctor
+# Should return "yes"
+```
+
+## Production Readiness Checklist
+
+- [ ] Container image built and pushed to private registry
+- [ ] Image tag is immutable (never `:latest` in production)
+- [ ] HA enabled (`replicaCount >= 2`, `leaderElection.enabled=true`)
+- [ ] Network policy applied
+- [ ] PodDisruptionBudget enabled
+- [ ] Prometheus alerts configured (reconcile errors, deployment down)
+- [ ] ServiceMonitor enabled if running Prometheus Operator
+- [ ] `watchNamespace` decision made deliberately (cluster-wide vs. scoped)
+- [ ] Tested upgrade procedure (`helm upgrade`, verify rollout)
+- [ ] Tested failure scenario (kill operator pod, confirm redeploy recovers with no data loss)
+- [ ] Pod Security Standards validated (`restricted`)
+- [ ] Ran the three demo failures (`config/samples/demo-*.yaml`) end to end and confirmed correct root causes
