@@ -120,3 +120,125 @@ func (r *PodDiagnosisReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				return ctrl.Result{Requeue: true}, nil
 			}
 			return ctrl.Result{}, err
+		}
+	} else if err := r.Update(ctx, &diagObj); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	ev := r.gatherEvidence(ctx, &pod, cs)
+	result := diagnosis.Diagnose(ev)
+
+	now := metav1.Now()
+	firstObserved := diagObj.Status.FirstObserved
+	if firstObserved.IsZero() {
+		firstObserved = now
+	}
+
+	diagObj.Status = diagv1alpha1.PodDiagnosisStatus{
+		Phase:                     "Diagnosed",
+		RootCause:                 result.RootCause,
+		Confidence:                result.Confidence,
+		Summary:                   result.Summary,
+		Recommendation:            result.Recommendation,
+		ExitCode:                  exitCodePtr(cs),
+		TerminationReason:         terminationReasonOf(cs),
+		RestartCount:              cs.RestartCount,
+		LastDiagnosedRestartCount: cs.RestartCount,
+		RecentEvents:              ev.RecentEvents,
+		LogExcerpt:                ev.LogTail,
+		RolloutContext:            ev.RolloutContext,
+		FirstObserved:             firstObserved,
+		LastObserved:              now,
+	}
+
+	if err := r.Status().Update(ctx, &diagObj); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	if r.Recorder != nil {
+		r.Recorder.Eventf(&pod, nil, corev1.EventTypeWarning, "CrashLoopDiagnosed", "Diagnose",
+			"[%s/%s] %s %s", result.RootCause, result.Confidence, result.Summary, result.Recommendation)
+	}
+
+	logger.Info("diagnosed failing container",
+		"pod", pod.Name, "container", cs.Name, "rootCause", result.RootCause,
+		"confidence", result.Confidence, "restarts", cs.RestartCount)
+
+	return ctrl.Result{RequeueAfter: diagnosisRequeueInterval}, nil
+}
+
+func (r *PodDiagnosisReconciler) gatherEvidence(ctx context.Context, pod *corev1.Pod, cs corev1.ContainerStatus) diagnosis.Evidence {
+	ev := diagnosis.Evidence{RestartCount: cs.RestartCount}
+
+	if cs.State.Waiting != nil {
+		ev.WaitingReason = cs.State.Waiting.Reason
+		ev.WaitingMessage = cs.State.Waiting.Message
+	}
+	if t := cs.LastTerminationState.Terminated; t != nil {
+		ev.HasTerminated = true
+		ev.TerminatedReason = t.Reason
+		ev.TerminatedMessage = t.Message
+		ev.ExitCode = t.ExitCode
+	}
+
+	ev.RecentEvents = r.recentEvents(ctx, pod)
+	ev.LogTail = r.logTail(ctx, pod, cs.Name)
+	ev.RecentRollout, ev.RolloutContext = r.rolloutContext(ctx, pod)
+
+	return ev
+}
+
+// recentEvents fetches the newest Kubernetes Events involving this pod,
+// via the same Search helper `kubectl describe pod` uses under the hood.
+func (r *PodDiagnosisReconciler) recentEvents(ctx context.Context, pod *corev1.Pod) []diagv1alpha1.EvidenceEvent {
+	logger := log.FromContext(ctx)
+	if r.ClientSet == nil {
+		return nil
+	}
+
+	list, err := r.ClientSet.CoreV1().Events(pod.Namespace).SearchWithContext(ctx, r.Scheme, pod)
+	if err != nil {
+		logger.V(1).Info("could not fetch events for pod", "pod", pod.Name, "error", err.Error())
+		return nil
+	}
+
+	sort.Slice(list.Items, func(i, j int) bool {
+		return list.Items[j].LastTimestamp.Before(&list.Items[i].LastTimestamp)
+	})
+
+	const maxEvents = 5
+	n := len(list.Items)
+	if n > maxEvents {
+		n = maxEvents
+	}
+	out := make([]diagv1alpha1.EvidenceEvent, 0, n)
+	for i := 0; i < n; i++ {
+		e := list.Items[i]
+		out = append(out, diagv1alpha1.EvidenceEvent{
+			Reason:        e.Reason,
+			Message:       e.Message,
+			Count:         e.Count,
+			LastTimestamp: e.LastTimestamp,
+		})
+	}
+	return out
+}
+
+// logTail returns the tail of the crashed container's previous run,
+// truncated to a bounded size to keep the CR small. Best-effort: returns
+// empty string if no previous instance exists or logs aren't fetchable yet.
+func (r *PodDiagnosisReconciler) logTail(ctx context.Context, pod *corev1.Pod, container string) string {
+	logger := log.FromContext(ctx)
+	if r.ClientSet == nil {
+		return ""
+	}
+
+	tail := r.LogTailLines
+	if tail <= 0 {
+		tail = 50
