@@ -12,17 +12,41 @@ tasks:
     cmds:
       - task --list
 
+  # ─── Web (dashboard SPA, embedded via go:embed — see internal/webui) ───────
+
+  web:build:
+    desc: Build the dashboard SPA into internal/webui/dist (required before any Go build/test/lint)
+    dir: web
+    sources:
+      - "src/**/*"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.ts"
+    generates:
+      - ../internal/webui/dist/**/*
+    cmds:
+      - npm ci
+      - npm run build
+
   # ─── Build ──────────────────────────────────────────────────────────────────
 
   build:
     desc: Build operator binary
+    deps: [web:build]
     cmds:
       - CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/manager ./cmd/main.go
+
+  build:hub:
+    desc: Build fleet hub binary
+    deps: [web:build]
+    cmds:
+      - CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/hub ./cmd/hub
 
   # ─── Test ───────────────────────────────────────────────────────────────────
 
   test:
     desc: Run all tests
+    deps: [web:build]
     cmds:
       - go test ./... -coverprofile=cover.out -v
 
@@ -33,11 +57,13 @@ tasks:
 
   lint:
     desc: Run linter
+    deps: [web:build]
     cmds:
       - golangci-lint run ./...
 
   fmt:
     desc: Format and vet
+    deps: [web:build]
     cmds:
       - go fmt ./...
       - go vet ./...
@@ -87,6 +113,7 @@ tasks:
 
   run:
     desc: Run operator locally against current cluster (dev mode)
+    deps: [web:build]
     cmds:
       - go run ./cmd/main.go --leader-elect=false
 

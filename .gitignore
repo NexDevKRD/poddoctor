@@ -11,3 +11,6 @@ vendor/
 .idea/
 .vscode/
 .claude
+web/node_modules/
+internal/webui/dist/
+.task/
