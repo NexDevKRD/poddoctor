@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -88,8 +89,9 @@ func TestReconcile_DiagnosesOOMKilledCrashLoop(t *testing.T) {
 		t.Fatalf("expected requeue after %v, got %v", diagnosisRequeueInterval, res.RequeueAfter)
 	}
 
+	diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: diagnosisName(pod.Name, "app")}
 	var diag diagv1alpha1.PodDiagnosis
-	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &diag); err != nil {
+	if err := r.Get(ctx, diagKey, &diag); err != nil {
 		t.Fatalf("expected PodDiagnosis to be created: %v", err)
 	}
 	if diag.Status.RootCause != diagv1alpha1.RootCauseOOMKilled {
@@ -128,8 +130,9 @@ func TestReconcile_SkipsHealthyPod(t *testing.T) {
 		t.Fatalf("expected no requeue for healthy pod, got %+v", res)
 	}
 
+	diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: diagnosisName(pod.Name, "app")}
 	var diag diagv1alpha1.PodDiagnosis
-	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &diag); err == nil {
+	if err := r.Get(ctx, diagKey, &diag); err == nil {
 		t.Fatalf("expected no PodDiagnosis for healthy pod")
 	}
 }
@@ -141,13 +144,14 @@ func TestReconcile_DedupesSameEpisode(t *testing.T) {
 
 	ctx := context.Background()
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+	diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: diagnosisName(pod.Name, "app")}
 
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("first Reconcile() error = %v", err)
 	}
 
 	var first diagv1alpha1.PodDiagnosis
-	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &first); err != nil {
+	if err := r.Get(ctx, diagKey, &first); err != nil {
 		t.Fatalf("get after first reconcile: %v", err)
 	}
 	firstObserved := first.Status.FirstObserved
@@ -159,10 +163,131 @@ func TestReconcile_DedupesSameEpisode(t *testing.T) {
 	}
 
 	var second diagv1alpha1.PodDiagnosis
-	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &second); err != nil {
+	if err := r.Get(ctx, diagKey, &second); err != nil {
 		t.Fatalf("get after second reconcile: %v", err)
 	}
 	if !second.Status.FirstObserved.Time.Equal(firstObserved.Time) {
 		t.Fatalf("FirstObserved changed on dedup: %v -> %v", firstObserved, second.Status.FirstObserved)
+	}
+}
+
+func TestReconcile_DiagnosesInitContainer(t *testing.T) {
+	scheme := newTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "migrator", Namespace: "default", UID: types.UID("pod-uid-2")},
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "run-migrations",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+					},
+					LastTerminationState: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1},
+					},
+				},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "app", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+			},
+		},
+	}
+	r := newReconciler(t, scheme, pod)
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: diagnosisName(pod.Name, "run-migrations")}
+	var diag diagv1alpha1.PodDiagnosis
+	if err := r.Get(ctx, diagKey, &diag); err != nil {
+		t.Fatalf("expected PodDiagnosis for failing init container: %v", err)
+	}
+	if diag.Status.RootCause != diagv1alpha1.RootCauseApplicationError {
+		t.Fatalf("RootCause = %s, want %s", diag.Status.RootCause, diagv1alpha1.RootCauseApplicationError)
+	}
+}
+
+func TestReconcile_DiagnosesEachFailingContainerSeparately(t *testing.T) {
+	scheme := newTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "multi", Namespace: "default", UID: types.UID("pod-uid-3")},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:         "app",
+					RestartCount: 3,
+					State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+					LastTerminationState: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137},
+					},
+				},
+				{
+					Name:         "sidecar",
+					RestartCount: 5,
+					State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+					LastTerminationState: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1},
+					},
+				},
+			},
+		},
+	}
+	r := newReconciler(t, scheme, pod)
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	for _, name := range []string{"app", "sidecar"} {
+		diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: diagnosisName(pod.Name, name)}
+		var diag diagv1alpha1.PodDiagnosis
+		if err := r.Get(ctx, diagKey, &diag); err != nil {
+			t.Fatalf("expected PodDiagnosis for container %q: %v", name, err)
+		}
+		if diag.Spec.ContainerName != name {
+			t.Fatalf("ContainerName = %s, want %s", diag.Spec.ContainerName, name)
+		}
+	}
+}
+
+func TestReconcile_RolloutContext_StatefulSet(t *testing.T) {
+	scheme := newTestScheme(t)
+	now := metav1.Now()
+
+	rev := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "db-6c9f7d",
+			Namespace:         "default",
+			CreationTimestamp: now,
+		},
+		Revision: 4,
+	}
+
+	pod := oomKilledPod()
+	pod.Name = "db-0"
+	pod.Labels = map[string]string{"controller-revision-hash": rev.Name}
+	pod.OwnerReferences = []metav1.OwnerReference{{Kind: "StatefulSet", Name: "db"}}
+	pod.CreationTimestamp = metav1.NewTime(now.Add(30 * time.Second))
+
+	r := newReconciler(t, scheme, pod, rev)
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: diagnosisName(pod.Name, "app")}
+	var diag diagv1alpha1.PodDiagnosis
+	if err := r.Get(ctx, diagKey, &diag); err != nil {
+		t.Fatalf("get diagnosis: %v", err)
+	}
+	if diag.Status.RolloutContext == "" {
+		t.Fatalf("expected RolloutContext to be set for pod started shortly after StatefulSet revision rollout")
 	}
 }

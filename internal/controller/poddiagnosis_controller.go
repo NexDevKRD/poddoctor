@@ -22,6 +22,8 @@ import (
 
 	diagv1alpha1 "github.com/chenar/poddoctor/api/v1alpha1"
 	"github.com/chenar/poddoctor/internal/diagnosis"
+	"github.com/chenar/poddoctor/internal/metrics"
+	"github.com/chenar/poddoctor/internal/notify"
 )
 
 // triggerReasons are the container waiting-state reasons that identify a
@@ -37,10 +39,18 @@ var triggerReasons = map[string]bool{
 // re-checked for a new restart (i.e. a new failure episode).
 const diagnosisRequeueInterval = 2 * time.Minute
 
-// PodDiagnosisReconciler watches Pods for CrashLoopBackOff/ImagePullBackOff,
-// gathers evidence (events, previous logs, rollout timing), runs the
-// rule-based diagnosis engine, and records the result as an owned
-// PodDiagnosis CR plus a Kubernetes Event on the Pod.
+// logFetchTimeout bounds how long a single previous-logs fetch may block a
+// reconcile, so a slow/hanging kubelet log stream can't wedge a worker.
+const logFetchTimeout = 5 * time.Second
+
+// webhookTimeout bounds how long the optional outbound notification may
+// block a reconcile.
+const webhookTimeout = 5 * time.Second
+
+// PodDiagnosisReconciler watches Pods for CrashLoopBackOff/ImagePullBackOff
+// (in init or regular containers), gathers evidence (events, previous logs,
+// rollout timing), runs the rule-based diagnosis engine, and records the
+// result as an owned PodDiagnosis CR plus a Kubernetes Event on the Pod.
 type PodDiagnosisReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -52,6 +62,11 @@ type PodDiagnosisReconciler struct {
 
 	LogTailLines  int64
 	RolloutWindow time.Duration
+
+	// WebhookURL, if set, receives a best-effort POST for every new
+	// diagnosis (see internal/notify). Empty disables notifications.
+	WebhookURL    string
+	WebhookFormat notify.Format
 }
 
 // +kubebuilder:rbac:groups=diagnostics.poddoctor.dev,resources=poddiagnoses,verbs=get;list;watch;create;update;patch;delete
@@ -61,12 +76,18 @@ type PodDiagnosisReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch
 
-// Reconcile handles one Pod key: it diagnoses the failing container (if any)
-// and writes/updates the corresponding PodDiagnosis object.
+// failingContainer is one container (init or regular) currently stuck in a
+// trigger reason, alongside the status PodDoctor needs to diagnose it.
+type failingContainer struct {
+	status corev1.ContainerStatus
+	isInit bool
+}
+
+// Reconcile handles one Pod key: it diagnoses every failing container (init
+// or regular) and writes/updates one PodDiagnosis object per container.
 func (r *PodDiagnosisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	var pod corev1.Pod
 	if err := r.Get(ctx, req.NamespacedName, &pod); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -79,28 +100,48 @@ func (r *PodDiagnosisReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	cs, failing := findFailingContainer(pod.Status.ContainerStatuses)
-	if !failing {
+	failing := findFailingContainers(&pod)
+	if len(failing) == 0 {
 		return ctrl.Result{}, nil
 	}
 
-	diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: pod.Name}
+	for _, fc := range failing {
+		needsRequeue, err := r.reconcileContainer(ctx, &pod, fc)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if needsRequeue {
+			return ctrl.Result{Requeue: true}, nil
+		}
+	}
+
+	return ctrl.Result{RequeueAfter: diagnosisRequeueInterval}, nil
+}
+
+// reconcileContainer diagnoses a single failing container and writes its
+// PodDiagnosis. needsRequeue is true on an optimistic-lock conflict, meaning
+// the caller should stop and let the next reconcile retry from scratch.
+func (r *PodDiagnosisReconciler) reconcileContainer(ctx context.Context, pod *corev1.Pod, fc failingContainer) (bool, error) {
+	logger := log.FromContext(ctx)
+	cs := fc.status
+
+	diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: diagnosisName(pod.Name, cs.Name)}
 	var diagObj diagv1alpha1.PodDiagnosis
 	getErr := r.Get(ctx, diagKey, &diagObj)
 	isNew := apierrors.IsNotFound(getErr)
 	if getErr != nil && !isNew {
-		return ctrl.Result{}, getErr
+		return false, getErr
 	}
 
 	// Already diagnosed this failure episode (restart count unchanged since
 	// last diagnosis) — nothing new to say, just recheck later.
 	if !isNew && diagObj.Status.LastDiagnosedRestartCount == cs.RestartCount {
-		return ctrl.Result{RequeueAfter: diagnosisRequeueInterval}, nil
+		return false, nil
 	}
 
 	if isNew {
 		diagObj = diagv1alpha1.PodDiagnosis{
-			ObjectMeta: metav1.ObjectMeta{Name: pod.Name, Namespace: pod.Namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: diagKey.Name, Namespace: pod.Namespace},
 		}
 	}
 
@@ -110,26 +151,29 @@ func (r *PodDiagnosisReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		ContainerName: cs.Name,
 		PodUID:        pod.UID,
 	}
-	if err := ctrl.SetControllerReference(&pod, &diagObj, r.Scheme); err != nil {
-		return ctrl.Result{}, err
+	if err := ctrl.SetControllerReference(pod, &diagObj, r.Scheme); err != nil {
+		return false, err
 	}
 
 	if isNew {
 		if err := r.Create(ctx, &diagObj); err != nil {
 			if apierrors.IsAlreadyExists(err) {
-				return ctrl.Result{Requeue: true}, nil
+				return true, nil
 			}
-			return ctrl.Result{}, err
+			return false, err
 		}
 	} else if err := r.Update(ctx, &diagObj); err != nil {
 		if apierrors.IsConflict(err) {
-			return ctrl.Result{Requeue: true}, nil
+			return true, nil
 		}
-		return ctrl.Result{}, err
+		return false, err
 	}
 
-	ev := r.gatherEvidence(ctx, &pod, cs)
+	ev := r.gatherEvidence(ctx, pod, cs)
 	result := diagnosis.Diagnose(ev)
+	if fc.isInit {
+		result.Summary = "[init container] " + result.Summary
+	}
 
 	now := metav1.Now()
 	firstObserved := diagObj.Status.FirstObserved
@@ -156,21 +200,39 @@ func (r *PodDiagnosisReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if err := r.Status().Update(ctx, &diagObj); err != nil {
 		if apierrors.IsConflict(err) {
-			return ctrl.Result{Requeue: true}, nil
+			return true, nil
 		}
-		return ctrl.Result{}, err
+		return false, err
 	}
 
+	metrics.DiagnosesTotal.WithLabelValues(string(result.RootCause), string(result.Confidence)).Inc()
+
 	if r.Recorder != nil {
-		r.Recorder.Eventf(&pod, nil, corev1.EventTypeWarning, "CrashLoopDiagnosed", "Diagnose",
+		r.Recorder.Eventf(pod, nil, corev1.EventTypeWarning, "CrashLoopDiagnosed", "Diagnose",
 			"[%s/%s] %s %s", result.RootCause, result.Confidence, result.Summary, result.Recommendation)
 	}
 
+	// ponytail: synchronous, bounded by webhookTimeout — simplest correct
+	// option for one notification per diagnosis; move to an async queue if
+	// webhook latency starts measurably slowing reconciles down.
+	if r.WebhookURL != "" {
+		notifyCtx, cancel := context.WithTimeout(ctx, webhookTimeout)
+		err := notify.Send(notifyCtx, r.WebhookURL, r.WebhookFormat, &diagObj)
+		cancel()
+		if err != nil {
+			logger.V(1).Info("webhook notification failed", "pod", pod.Name, "container", cs.Name, "error", err.Error())
+		}
+	}
+
 	logger.Info("diagnosed failing container",
-		"pod", pod.Name, "container", cs.Name, "rootCause", result.RootCause,
+		"pod", pod.Name, "container", cs.Name, "init", fc.isInit, "rootCause", result.RootCause,
 		"confidence", result.Confidence, "restarts", cs.RestartCount)
 
-	return ctrl.Result{RequeueAfter: diagnosisRequeueInterval}, nil
+	return false, nil
+}
+
+func diagnosisName(podName, containerName string) string {
+	return podName + "-" + containerName
 }
 
 func (r *PodDiagnosisReconciler) gatherEvidence(ctx context.Context, pod *corev1.Pod, cs corev1.ContainerStatus) diagnosis.Evidence {
@@ -232,12 +294,16 @@ func (r *PodDiagnosisReconciler) recentEvents(ctx context.Context, pod *corev1.P
 
 // logTail returns the tail of the crashed container's previous run,
 // truncated to a bounded size to keep the CR small. Best-effort: returns
-// empty string if no previous instance exists or logs aren't fetchable yet.
+// empty string if no previous instance exists or logs aren't fetchable
+// within logFetchTimeout.
 func (r *PodDiagnosisReconciler) logTail(ctx context.Context, pod *corev1.Pod, container string) string {
 	logger := log.FromContext(ctx)
 	if r.ClientSet == nil {
 		return ""
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, logFetchTimeout)
+	defer cancel()
 
 	tail := r.LogTailLines
 	if tail <= 0 {
@@ -272,23 +338,28 @@ func (r *PodDiagnosisReconciler) logTail(ctx context.Context, pod *corev1.Pod, c
 }
 
 // rolloutContext reports whether the pod started shortly after its owning
-// Deployment rolled out a new ReplicaSet revision — a strong hint that a
-// recent deploy introduced the failure.
+// workload rolled out a new revision — a strong hint that a recent deploy
+// introduced the failure. Deployment-managed pods are correlated via their
+// ReplicaSet's creation time; StatefulSet/DaemonSet-managed pods (which
+// have no intermediate ReplicaSet) are correlated via their
+// controller-revision-hash ControllerRevision instead.
 func (r *PodDiagnosisReconciler) rolloutContext(ctx context.Context, pod *corev1.Pod) (bool, string) {
-	rsRef := findOwner(pod.OwnerReferences, "ReplicaSet")
-	if rsRef == nil {
-		return false, ""
+	if rsRef := findOwner(pod.OwnerReferences, "ReplicaSet"); rsRef != nil {
+		return r.rolloutContextFromReplicaSet(ctx, pod, rsRef)
 	}
+	if owner := findOwnerAny(pod.OwnerReferences, "StatefulSet", "DaemonSet"); owner != nil {
+		return r.rolloutContextFromControllerRevision(ctx, pod, owner)
+	}
+	return false, ""
+}
 
+func (r *PodDiagnosisReconciler) rolloutContextFromReplicaSet(ctx context.Context, pod *corev1.Pod, rsRef *metav1.OwnerReference) (bool, string) {
 	var rs appsv1.ReplicaSet
 	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: rsRef.Name}, &rs); err != nil {
 		return false, ""
 	}
 
-	window := r.RolloutWindow
-	if window <= 0 {
-		window = 10 * time.Minute
-	}
+	window := r.rolloutWindow()
 	if pod.CreationTimestamp.After(rs.CreationTimestamp.Add(window)) {
 		return false, ""
 	}
@@ -303,22 +374,65 @@ func (r *PodDiagnosisReconciler) rolloutContext(ctx context.Context, pod *corev1
 	return true, fmt.Sprintf("pod started %s after deployment %q rolled out replicaset %q (revision %s)", elapsed, deployRef.Name, rs.Name, revision)
 }
 
+func (r *PodDiagnosisReconciler) rolloutContextFromControllerRevision(ctx context.Context, pod *corev1.Pod, owner *metav1.OwnerReference) (bool, string) {
+	revName := pod.Labels["controller-revision-hash"]
+	if revName == "" {
+		return false, ""
+	}
+
+	var rev appsv1.ControllerRevision
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: revName}, &rev); err != nil {
+		return false, ""
+	}
+
+	window := r.rolloutWindow()
+	if pod.CreationTimestamp.After(rev.CreationTimestamp.Add(window)) {
+		return false, ""
+	}
+
+	elapsed := pod.CreationTimestamp.Sub(rev.CreationTimestamp.Time).Round(time.Second)
+	return true, fmt.Sprintf("pod started %s after %s %q rolled out revision %q (revision %d)", elapsed, owner.Kind, owner.Name, rev.Name, rev.Revision)
+}
+
+func (r *PodDiagnosisReconciler) rolloutWindow() time.Duration {
+	if r.RolloutWindow <= 0 {
+		return 10 * time.Minute
+	}
+	return r.RolloutWindow
+}
+
 func findOwner(refs []metav1.OwnerReference, kind string) *metav1.OwnerReference {
+	return findOwnerAny(refs, kind)
+}
+
+func findOwnerAny(refs []metav1.OwnerReference, kinds ...string) *metav1.OwnerReference {
 	for i := range refs {
-		if refs[i].Kind == kind {
-			return &refs[i]
+		for _, kind := range kinds {
+			if refs[i].Kind == kind {
+				return &refs[i]
+			}
 		}
 	}
 	return nil
 }
 
-func findFailingContainer(statuses []corev1.ContainerStatus) (corev1.ContainerStatus, bool) {
-	for _, cs := range statuses {
+// findFailingContainers returns every init or regular container currently
+// stuck in a trigger reason (e.g. CrashLoopBackOff, ImagePullBackOff).
+// Init containers are checked first since they block the pod from starting
+// at all.
+func findFailingContainers(pod *corev1.Pod) []failingContainer {
+	var out []failingContainer
+	for _, cs := range pod.Status.InitContainerStatuses {
 		if cs.State.Waiting != nil && triggerReasons[cs.State.Waiting.Reason] {
-			return cs, true
+			out = append(out, failingContainer{status: cs, isInit: true})
 		}
 	}
-	return corev1.ContainerStatus{}, false
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Waiting != nil && triggerReasons[cs.State.Waiting.Reason] {
+			out = append(out, failingContainer{status: cs})
+		}
+	}
+	return out
 }
 
 func terminationReasonOf(cs corev1.ContainerStatus) string {
@@ -345,8 +459,7 @@ func failingPodPredicate() predicate.Predicate {
 		if !ok {
 			return false
 		}
-		_, found := findFailingContainer(pod.Status.ContainerStatuses)
-		return found
+		return len(findFailingContainers(pod)) > 0
 	})
 }
 
@@ -357,6 +470,9 @@ func (r *PodDiagnosisReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.RolloutWindow <= 0 {
 		r.RolloutWindow = 10 * time.Minute
+	}
+	if r.WebhookFormat == "" {
+		r.WebhookFormat = notify.FormatGeneric
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("poddiagnosis").
