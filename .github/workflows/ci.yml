@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
       - run: helm lint charts/poddoctor
       - run: helm template poddoctor charts/poddoctor > /dev/null
       - run: helm lint charts/poddoctor-hub
@@ -98,7 +98,7 @@ jobs:
     needs: [docker, helm]
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
       - uses: helm/kind-action@v1
         with:
           cluster_name: poddoctor-ci

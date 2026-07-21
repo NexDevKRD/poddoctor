@@ -69,7 +69,7 @@ jobs:
     needs: [image, hub-image]
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
 
       - run: |
           set -euo pipefail
