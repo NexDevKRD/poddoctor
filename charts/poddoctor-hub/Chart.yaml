@@ -1,0 +1,16 @@
+apiVersion: v2
+name: poddoctor-hub
+description: PodDoctor fleet hub — aggregates diagnoses posted from many clusters' PodDoctor operators into one dashboard/API, backed by Postgres.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/chenar/poddoctor
+sources:
+  - https://github.com/chenar/poddoctor
+keywords:
+  - kubernetes-operator
+  - observability
+  - fleet-management
+maintainers:
+  - name: chenarrr

@@ -36,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t poddoctor:ci .
+      - run: docker build -f Dockerfile.hub -t poddoctor-hub:ci .
 
   helm:
     runs-on: ubuntu-latest
@@ -44,10 +45,53 @@ jobs:
       - uses: azure/setup-helm@v4
       - run: helm lint charts/poddoctor
       - run: helm template poddoctor charts/poddoctor > /dev/null
+      - run: helm lint charts/poddoctor-hub
+      - run: >
+          helm template hub charts/poddoctor-hub
+          --set database.dsn=postgres://user:pass@host:5432/poddoctor
+          --set auth.token=ci-token > /dev/null
       - name: verify Helm CRD template matches kustomize CRD base
         run: |
           diff <(sed -n '/^spec:/,$p' config/crd/bases/diagnostics.poddoctor.dev_poddiagnoses.yaml) \
                <(sed -n '/^spec:/,$p' charts/poddoctor/templates/crd.yaml | sed '/{{- end }}/d')
+
+  hub-smoke-test:
+    runs-on: ubuntu-latest
+    needs: unit
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: poddoctor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: go build -o /tmp/hub ./cmd/hub
+      - name: start hub against the Postgres service container
+        run: |
+          DATABASE_URL="postgres://postgres:postgres@localhost:5432/poddoctor?sslmode=disable" \
+          PODDOCTOR_HUB_TOKEN=ci-token \
+          /tmp/hub --listen-address=:8090 &
+          for i in $(seq 1 20); do curl -sf http://localhost:8090/healthz && break || sleep 1; done
+      - name: exercise ingest, auth, and dashboard
+        run: |
+          set -euo pipefail
+          curl -sf -o /dev/null -w '%{http_code}\n' http://localhost:8090/readyz
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8090/ingest -d '{}')" = "401"
+          curl -sf -X POST http://localhost:8090/ingest \
+            -H "Authorization: Bearer ci-token" -H "Content-Type: application/json" \
+            -d '{"cluster":"ci","namespace":"default","pod":"demo","container":"app","rootCause":"OOMKilled","confidence":"High"}'
+          curl -sf http://localhost:8090/api/diagnoses -H "Authorization: Bearer ci-token" | grep -q '"pod":"demo"'
 
   e2e:
     runs-on: ubuntu-latest

@@ -1,0 +1,26 @@
+PodDoctor Fleet Hub is installed.
+
+{{- if not (or .Values.database.dsn .Values.database.existingSecret) }}
+
+⚠  No database configured — the hub will not start until you set one:
+   --set database.dsn=postgres://user:pass@host:5432/poddoctor?sslmode=require
+   (or database.existingSecret for a Secret you manage yourself)
+{{- end }}
+{{- if not (or .Values.auth.token .Values.auth.existingSecret) }}
+
+⚠  No auth token configured — every endpoint (ingest, API, dashboard) is
+   unauthenticated. Set auth.token (or auth.existingSecret) before pointing
+   any cluster's PodDoctor --webhook-url here.
+{{- end }}
+
+View the fleet dashboard:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "poddoctor-hub.fullname" . }} 8090:{{ .Values.service.port }}
+  open http://localhost:8090
+
+Point a cluster's PodDoctor at this hub (values.yaml on the poddoctor chart):
+  notifications:
+    routes:
+      - namespaces: ["*"]
+        webhookURL: "http://{{ include "poddoctor-hub.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/ingest"
+        webhookFormat: generic
+        webhookToken: "<same token as auth.token above>"

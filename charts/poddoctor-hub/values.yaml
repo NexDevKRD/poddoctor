@@ -1,0 +1,72 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/chenar/poddoctor-hub
+  tag: ""  # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+database:
+  # Postgres connection string, e.g. postgres://user:pass@host:5432/poddoctor?sslmode=require
+  # Plaintext here is fine for a quick try; prefer existingSecret below for
+  # anything you'd mind seeing in `helm get values`.
+  dsn: ""
+  # Name of an existing Secret carrying the DSN under existingSecretKey,
+  # instead of database.dsn above.
+  existingSecret: ""
+  existingSecretKey: "dsn"
+
+auth:
+  # Bearer token required on every endpoint (ingest, API, dashboard).
+  # Prefer existingSecret below over plaintext here.
+  token: ""
+  existingSecret: ""
+  existingSecretKey: "token"
+
+service:
+  type: ClusterIP
+  port: 8090
+
+# Only enable if the hub should be reachable from outside the cluster
+# (e.g. clusters posting to it over the internet, or ops browsing the
+# dashboard). Otherwise use kubectl port-forward.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tls: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
