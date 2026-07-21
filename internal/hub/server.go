@@ -136,6 +136,7 @@ type dashboardRow struct {
 	Cluster        string
 	Namespace      string
 	Pod            string
+	Container      string
 	RootCause      string
 	Confidence     string
 	Summary        string
@@ -162,6 +163,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			Cluster:        d.Cluster,
 			Namespace:      d.Namespace,
 			Pod:            d.Pod,
+			Container:      d.Container,
 			RootCause:      d.RootCause,
 			Confidence:     d.Confidence,
 			Summary:        d.Summary,
@@ -220,6 +222,7 @@ const dashboardTemplate = `<!DOCTYPE html>
   .conf         { color: #8b949e; font-size: .8rem; }
   .cluster      { font-family: ui-monospace, monospace; font-size: .8rem; color: #58a6ff; }
   .pod          { font-family: ui-monospace, monospace; font-size: .85rem; }
+  .container    { font-family: ui-monospace, monospace; font-size: .75rem; color: #8b949e; }
   .ns           { color: #8b949e; }
   .summary      { max-width: 30ch; }
   .rec          { max-width: 30ch; color: #8b949e; }
@@ -250,7 +253,7 @@ const dashboardTemplate = `<!DOCTYPE html>
     {{ range .Rows }}
     <tr>
       <td><span class="cluster">{{ .Cluster }}</span></td>
-      <td><div class="pod">{{ .Pod }}</div><div class="ns">{{ .Namespace }}</div></td>
+      <td><div class="pod">{{ .Pod }}</div><div class="container">{{ .Container }}</div><div class="ns">{{ .Namespace }}</div></td>
       <td><span class="badge {{ causeClass .RootCause }}">{{ .RootCause }}</span><div class="conf">{{ .Confidence }} confidence</div></td>
       <td class="summary">{{ .Summary }}{{ if gt .Suppressed 0 }} <span class="conf">(+{{ .Suppressed }} more)</span>{{ end }}</td>
       <td class="rec">{{ .Recommendation }}</td>

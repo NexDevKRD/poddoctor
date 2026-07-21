@@ -42,7 +42,7 @@ func TestHandler_EmptyState(t *testing.T) {
 
 func TestHandler_ListsDiagnoses(t *testing.T) {
 	diag := &diagv1alpha1.PodDiagnosis{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-oomkilled", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-oomkilled-app", Namespace: "default"},
 		Spec:       diagv1alpha1.PodDiagnosisSpec{PodName: "demo-oomkilled", PodNamespace: "default", ContainerName: "app"},
 		Status: diagv1alpha1.PodDiagnosisStatus{
 			Phase:          "Diagnosed",
@@ -51,6 +51,11 @@ func TestHandler_ListsDiagnoses(t *testing.T) {
 			Summary:        "Container exceeded its memory limit and was killed by the kernel OOM killer.",
 			Recommendation: "Raise resources.limits.memory.",
 			RestartCount:   3,
+			RolloutContext: "started 45s after deployment/api rolled to revision 12",
+			LogExcerpt:     "panic: out of memory",
+			RecentEvents: []diagv1alpha1.EvidenceEvent{
+				{Reason: "BackOff", Message: "Back-off restarting failed container", Count: 3},
+			},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(diag).Build()
@@ -62,7 +67,15 @@ func TestHandler_ListsDiagnoses(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	for _, want := range []string{"demo-oomkilled", "OOMKilled", "High confidence", "Raise resources.limits.memory."} {
+	for _, want := range []string{
+		"demo-oomkilled", "OOMKilled", "High confidence", "Raise resources.limits.memory.",
+		">app<",                // container column
+		"1 critical",           // severity summary badge
+		"started 45s after",    // rollout context, now surfaced
+		"panic: out of memory", // log excerpt, now surfaced
+		"Back-off restarting failed container (x3)", // recent events, now surfaced
+		"id=\"filter\"", // client-side search box
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected body to contain %q, got:\n%s", want, body)
 		}
