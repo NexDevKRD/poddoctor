@@ -1,0 +1,21 @@
+# Demo: a container that allocates past its memory limit and gets OOMKilled,
+# looping into CrashLoopBackOff. PodDoctor should diagnose this as OOMKilled
+# with High confidence within ~1 reconcile after the first restart.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-oomkilled
+  labels:
+    app.kubernetes.io/part-of: poddoctor-demo
+spec:
+  restartPolicy: Always
+  containers:
+    - name: app
+      image: polinux/stress
+      command: ["stress"]
+      args: ["--vm", "1", "--vm-bytes", "150M", "--vm-hang", "1"]
+      resources:
+        limits:
+          memory: "50Mi"
+        requests:
+          memory: "50Mi"
