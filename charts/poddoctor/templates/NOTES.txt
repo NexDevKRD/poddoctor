@@ -1,0 +1,30 @@
+PodDoctor is installed in namespace {{ .Release.Namespace }}.
+
+It is now watching {{ if .Values.watchNamespace }}namespace "{{ .Values.watchNamespace }}"{{ else }}all namespaces{{ end }} for
+CrashLoopBackOff / ImagePullBackOff pods.
+
+Check it's running:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+See diagnoses as they're produced:
+  kubectl get poddiagnoses -A
+  kubectl get pd -A                 # short name
+  kubectl describe pd <pod-name> -n <namespace>
+
+Trigger a demo failure to see it work end to end:
+  kubectl apply -f https://raw.githubusercontent.com/chenar/poddoctor/main/config/samples/demo-oomkilled.yaml
+  kubectl get pd demo-oomkilled -w
+
+{{- if .Values.dashboard.enabled }}
+
+Open the dashboard (a small read-only page showing why each pod crashed):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "poddoctor.fullname" . }}-dashboard {{ .Values.dashboard.port }}:{{ .Values.dashboard.port }}
+  open http://localhost:{{ .Values.dashboard.port }}
+{{- end }}
+
+{{- if not .Values.metrics.serviceMonitor.enabled }}
+
+Prometheus metrics are exposed but no ServiceMonitor was created
+(metrics.serviceMonitor.enabled=false). Set it to true if you run the
+Prometheus Operator.
+{{- end }}
