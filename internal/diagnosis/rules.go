@@ -106,3 +106,111 @@ func diagnosePrimary(ev Evidence) Result {
 			Summary:        fmt.Sprintf("Container image reference is invalid: %s", firstNonEmpty(ev.WaitingMessage, ev.WaitingReason)),
 			Recommendation: "Fix the image field in the pod spec (typo, missing registry, or invalid tag).",
 		}
+	case "RunContainerError", "CreateContainerError", "CreateContainerConfigError":
+		// The container runtime failed before the process ever ran (e.g. the
+		// entrypoint binary doesn't exist, isn't executable, or the config is
+		// invalid). There's no real exit code here — runc/containerd report a
+		// synthetic one — so this must be caught before the exit-code switch below.
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseBadCommand,
+			Confidence:     diagv1alpha1.ConfidenceHigh,
+			Summary:        fmt.Sprintf("Container runtime failed to start the container: %s", firstNonEmpty(ev.WaitingMessage, ev.TerminatedMessage)),
+			Recommendation: "Check the container's command/entrypoint against what's actually in the image (missing binary, bad permissions, or invalid working directory).",
+		}
+	}
+
+	if !ev.HasTerminated {
+		return Result{RootCause: diagv1alpha1.RootCauseUnknown}
+	}
+
+	if ev.TerminatedReason == "OOMKilled" {
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseOOMKilled,
+			Confidence:     diagv1alpha1.ConfidenceHigh,
+			Summary:        "Container exceeded its memory limit and was killed by the kernel OOM killer.",
+			Recommendation: "Raise resources.limits.memory, or investigate a possible memory leak in the application.",
+		}
+	}
+
+	switch ev.TerminatedReason {
+	case "StartError", "CreateContainerError", "CreateContainerConfigError":
+		// Same synthetic-failure case as the WaitingReason check above, but
+		// seen once the container has settled into CrashLoopBackOff and the
+		// runtime error moved from Waiting into LastTerminationState.
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseBadCommand,
+			Confidence:     diagv1alpha1.ConfidenceHigh,
+			Summary:        fmt.Sprintf("Container runtime failed to start the container: %s", firstNonEmpty(ev.TerminatedMessage, ev.TerminatedReason)),
+			Recommendation: "Check the container's command/entrypoint against what's actually in the image (missing binary, bad permissions, or invalid working directory).",
+		}
+	}
+
+	switch ev.ExitCode {
+	case 137:
+		conf := diagv1alpha1.ConfidenceMedium
+		if strings.Contains(strings.ToLower(ev.LogTail), "out of memory") || strings.Contains(strings.ToLower(ev.LogTail), "oom") {
+			conf = diagv1alpha1.ConfidenceHigh
+		}
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseOOMKilled,
+			Confidence:     conf,
+			Summary:        "Container exited with code 137 (SIGKILL), most commonly caused by an out-of-memory kill.",
+			Recommendation: "Check `kubectl describe pod` for an OOMKilled reason and raise resources.limits.memory if confirmed.",
+		}
+	case 139:
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseSegFault,
+			Confidence:     diagv1alpha1.ConfidenceHigh,
+			Summary:        "Container exited with code 139 (SIGSEGV) — a native crash inside the process.",
+			Recommendation: "Check for a corrupted binary, incompatible base image (e.g. glibc/musl mismatch), or a bug in native/CGo code.",
+		}
+	case 143:
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseSignalKilled,
+			Confidence:     diagv1alpha1.ConfidenceMedium,
+			Summary:        "Container exited with code 143 (SIGTERM) — it was asked to stop.",
+			Recommendation: "Check for node pressure/eviction, a failing liveness probe, or terminationGracePeriodSeconds too short for a clean shutdown.",
+		}
+	case 126:
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseBadCommand,
+			Confidence:     diagv1alpha1.ConfidenceHigh,
+			Summary:        "Container exited with code 126 — the command was found but is not executable.",
+			Recommendation: "Check file permissions on the entrypoint script/binary in the image (missing chmod +x).",
+		}
+	case 127:
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseBadCommand,
+			Confidence:     diagv1alpha1.ConfidenceHigh,
+			Summary:        "Container exited with code 127 — the command was not found.",
+			Recommendation: "Check the container's command/entrypoint and that the binary exists in the image (common after a slim/distroless base image switch).",
+		}
+	case 0:
+		return Result{RootCause: diagv1alpha1.RootCauseUnknown}
+	default:
+		return Result{
+			RootCause:      diagv1alpha1.RootCauseApplicationError,
+			Confidence:     diagv1alpha1.ConfidenceMedium,
+			Summary:        fmt.Sprintf("Container process exited with code %d.", ev.ExitCode),
+			Recommendation: "Inspect the attached log excerpt for the application-level error that caused the exit.",
+		}
+	}
+}
+
+func probeFailing(events []diagv1alpha1.EvidenceEvent) bool {
+	for _, e := range events {
+		if e.Reason == "Unhealthy" && strings.Contains(strings.ToLower(e.Message), "probe failed") {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
