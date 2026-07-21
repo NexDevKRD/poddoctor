@@ -51,6 +51,8 @@ func main() {
 	var notifyConfigPath string
 	var alertGroupWindow time.Duration
 	var evidenceQPS float64
+	var kubeAPIQPS float64
+	var kubeAPIBurst int
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -79,6 +81,10 @@ func main() {
 		"Fold repeated diagnoses with the same namespace+root-cause into one notification within this window, so a mass crash-loop sends one alert instead of hundreds.")
 	flag.Float64Var(&evidenceQPS, "evidence-qps", 20,
 		"Max apiserver requests/sec spent gathering evidence (Events search, previous logs) — protects the apiserver from a self-inflicted request storm when many pods fail at once.")
+	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", 50,
+		"QPS for the underlying Kubernetes client (watches, writes, RBAC-permitted reads). client-go defaults to 5 if left unset, which throttles a busy controller well below --evidence-qps.")
+	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 100,
+		"Burst for the underlying Kubernetes client, paired with --kube-api-qps.")
 
 	opts := zap.Options{
 		Development: true,
@@ -100,6 +106,10 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "poddoctor.poddoctor.dev",
+		// Step down immediately on shutdown instead of waiting out the full
+		// lease duration — keeps rolling updates from stalling diagnosis
+		// for the lease's ~15s before the new replica can take over.
+		LeaderElectionReleaseOnCancel: true,
 	}
 	if watchNamespace != "" {
 		namespaces := map[string]cache.Config{}
@@ -115,6 +125,8 @@ func main() {
 	}
 
 	restConfig := ctrl.GetConfigOrDie()
+	restConfig.QPS = float32(kubeAPIQPS)
+	restConfig.Burst = kubeAPIBurst
 
 	mgr, err := ctrl.NewManager(restConfig, ctrlOptions)
 	if err != nil {

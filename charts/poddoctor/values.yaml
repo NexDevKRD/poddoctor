@@ -24,6 +24,11 @@ diagnosis:
   # previous logs). Protects the apiserver from a self-inflicted request
   # storm when a bad rollout crash-loops many pods at once.
   evidenceQPS: 20
+  # QPS/burst for the underlying Kubernetes client (watches, writes, reads).
+  # client-go defaults to 5 QPS if left unset, which throttles a busy
+  # controller well below evidenceQPS above.
+  kubeAPIQPS: 50
+  kubeAPIBurst: 100
 
 # clusterName identifies this cluster in outbound notifications
 # (notifications.webhookURL / notify-config routes) — set it when

@@ -40,6 +40,8 @@ spec:
             - --log-tail-lines={{ .Values.diagnosis.logTailLines }}
             - --rollout-window={{ .Values.diagnosis.rolloutWindow }}
             - --evidence-qps={{ .Values.diagnosis.evidenceQPS }}
+            - --kube-api-qps={{ .Values.diagnosis.kubeAPIQPS }}
+            - --kube-api-burst={{ .Values.diagnosis.kubeAPIBurst }}
             - --dashboard-bind-address={{ if .Values.dashboard.enabled }}:{{ .Values.dashboard.port }}{{ else }}0{{ end }}
             {{- if .Values.watchNamespace }}
             - --namespace={{ .Values.watchNamespace }}

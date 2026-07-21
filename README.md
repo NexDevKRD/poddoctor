@@ -207,6 +207,7 @@ Short name: `pd`
 | `diagnosis.logTailLines` | `50` | Lines of previous-container-instance logs fetched as evidence |
 | `diagnosis.rolloutWindow` | `10m` | How soon after a rollout a pod start still counts as rollout-correlated |
 | `diagnosis.evidenceQPS` | `20` | Max apiserver requests/sec spent gathering evidence — caps self-inflicted load during a mass crash-loop |
+| `diagnosis.kubeAPIQPS` / `diagnosis.kubeAPIBurst` | `50` / `100` | QPS/burst for the underlying Kubernetes client. client-go defaults to 5 QPS if left unset, which would throttle the controller below `evidenceQPS` itself |
 | `metrics.serviceMonitor.enabled` | `false` | Create a `ServiceMonitor` for the Prometheus Operator |
 | `dashboard.enabled` | `true` | Serve the read-only HTML dashboard (`svc/<release>-dashboard`) |
 | `notifications.webhookURL` | `""` (disabled) | POST a notification for every new diagnosis — generic JSON or a Slack incoming webhook |
