@@ -1,9 +1,9 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,21 +26,25 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func TestHandler_EmptyState(t *testing.T) {
+func TestAPIList_EmptyState(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	rec := httptest.NewRecorder()
-	Handler(c)(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(c).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "No crash loops diagnosed") {
-		t.Fatalf("expected empty-state message, got: %s", rec.Body.String())
+	var got []apiRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty list, got %+v", got)
 	}
 }
 
-func TestHandler_ListsDiagnoses(t *testing.T) {
+func TestAPIList_ReturnsDiagnoses(t *testing.T) {
 	diag := &diagv1alpha1.PodDiagnosis{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo-oomkilled-app", Namespace: "default"},
 		Spec:       diagv1alpha1.PodDiagnosisSpec{PodName: "demo-oomkilled", PodNamespace: "default", ContainerName: "app"},
@@ -61,37 +65,34 @@ func TestHandler_ListsDiagnoses(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(diag).Build()
 
 	rec := httptest.NewRecorder()
-	Handler(c)(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(c).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil))
 
-	body := rec.Body.String()
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	for _, want := range []string{
-		"demo-oomkilled", "OOMKilled", "High confidence", "Raise resources.limits.memory.",
-		">app<",                // container column
-		"1 critical",           // severity summary badge
-		"started 45s after",    // rollout context, now surfaced
-		"panic: out of memory", // log excerpt, now surfaced
-		"Back-off restarting failed container (x3)", // recent events, now surfaced
-		"id=\"filter\"", // client-side search box
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("expected body to contain %q, got:\n%s", want, body)
-		}
+	var got []apiRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(got))
+	}
+	r := got[0]
+	if r.Pod != "demo-oomkilled" || r.Container != "app" || r.RootCause != "OOMKilled" || r.Severity != "critical" {
+		t.Fatalf("unexpected record: %+v", r)
+	}
+	if r.RolloutContext == "" || r.LogExcerpt == "" || len(r.RecentEvents) != 1 {
+		t.Fatalf("expected evidence fields populated, got: %+v", r)
 	}
 }
 
-func TestCauseClass(t *testing.T) {
-	cases := map[string]string{
-		"OOMKilled":      "sev-critical",
-		"ImagePullError": "sev-high",
-		"SignalKilled":   "sev-medium",
-		"Unknown":        "sev-unknown",
-	}
-	for cause, want := range cases {
-		if got := causeClass(cause); got != want {
-			t.Errorf("causeClass(%q) = %q, want %q", cause, got, want)
-		}
+func TestHandler_ServesStaticAssetsAtRoot(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+
+	rec := httptest.NewRecorder()
+	Handler(c).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 }

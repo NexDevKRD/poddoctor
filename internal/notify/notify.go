@@ -22,17 +22,23 @@ const (
 
 // Payload is the generic (non-Slack) webhook body. It's also what the
 // fleet hub (cmd/hub) expects on its ingest endpoint, so a cluster is
-// just another webhook target.
+// just another webhook target. Carries the same evidence the per-cluster
+// dashboard shows, so the fleet-wide view isn't missing detail the
+// single-cluster one has.
 type Payload struct {
-	Cluster         string `json:"cluster,omitempty"`
-	Pod             string `json:"pod"`
-	Namespace       string `json:"namespace"`
-	Container       string `json:"container"`
-	RootCause       string `json:"rootCause"`
-	Confidence      string `json:"confidence"`
-	Summary         string `json:"summary"`
-	Recommendation  string `json:"recommendation"`
-	SuppressedCount int    `json:"suppressedCount,omitempty"`
+	Cluster         string   `json:"cluster,omitempty"`
+	Pod             string   `json:"pod"`
+	Namespace       string   `json:"namespace"`
+	Container       string   `json:"container"`
+	RootCause       string   `json:"rootCause"`
+	Confidence      string   `json:"confidence"`
+	Summary         string   `json:"summary"`
+	Recommendation  string   `json:"recommendation"`
+	SuppressedCount int      `json:"suppressedCount,omitempty"`
+	Restarts        int32    `json:"restarts,omitempty"`
+	RolloutContext  string   `json:"rolloutContext,omitempty"`
+	LogExcerpt      string   `json:"logExcerpt,omitempty"`
+	RecentEvents    []string `json:"recentEvents,omitempty"`
 }
 
 // Notification is one outbound alert: a diagnosis, optionally tagged with
@@ -49,6 +55,12 @@ type Notification struct {
 // endpoint). ctx should carry a deadline; Send does not add one of its own.
 func Send(ctx context.Context, url string, format Format, token string, n Notification) error {
 	diag := n.Diag
+
+	events := make([]string, 0, len(diag.Status.RecentEvents))
+	for _, e := range diag.Status.RecentEvents {
+		events = append(events, fmt.Sprintf("%s: %s (x%d)", e.Reason, e.Message, e.Count))
+	}
+
 	p := Payload{
 		Cluster:         n.Cluster,
 		Pod:             diag.Spec.PodName,
@@ -59,6 +71,10 @@ func Send(ctx context.Context, url string, format Format, token string, n Notifi
 		Summary:         diag.Status.Summary,
 		Recommendation:  diag.Status.Recommendation,
 		SuppressedCount: n.SuppressedCount,
+		Restarts:        diag.Status.RestartCount,
+		RolloutContext:  diag.Status.RolloutContext,
+		LogExcerpt:      diag.Status.LogExcerpt,
+		RecentEvents:    events,
 	}
 
 	var body []byte

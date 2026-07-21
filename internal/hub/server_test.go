@@ -131,11 +131,8 @@ func TestAPIList_ReturnsJSON(t *testing.T) {
 	}
 }
 
-func TestDashboard_RendersHTML(t *testing.T) {
-	fs := &fakeStore{listResult: []Diagnosis{
-		{Cluster: "us-east-1", Namespace: "payments", Pod: "api-1", RootCause: "OOMKilled", Confidence: "High", Summary: "OOM"},
-	}}
-	srv := NewServer(fs, "")
+func TestRoot_ServesDashboardSPA(t *testing.T) {
+	srv := NewServer(&fakeStore{}, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -144,8 +141,34 @@ func TestDashboard_RendersHTML(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
 	}
-	if body := w.Body.String(); !bytes.Contains([]byte(body), []byte("api-1")) {
-		t.Fatalf("expected dashboard body to mention pod name, got: %s", body)
+}
+
+func TestRoot_RequiresAuthWhenTokenSet(t *testing.T) {
+	srv := NewServer(&fakeStore{}, "s3cr3t")
+
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestAPIList_IncludesSeverity(t *testing.T) {
+	fs := &fakeStore{listResult: []Diagnosis{
+		{Cluster: "us-east-1", Namespace: "payments", Pod: "api-1", RootCause: "OOMKilled"},
+	}}
+	srv := NewServer(fs, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil)
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, req)
+
+	var got []apiRecord
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != 1 || got[0].Severity != "critical" {
+		t.Fatalf("unexpected response: %+v", got)
 	}
 }
 

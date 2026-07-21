@@ -7,6 +7,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -25,6 +26,10 @@ type Diagnosis struct {
 	Summary         string    `json:"summary"`
 	Recommendation  string    `json:"recommendation"`
 	SuppressedCount int       `json:"suppressedCount"`
+	Restarts        int32     `json:"restarts"`
+	RolloutContext  string    `json:"rolloutContext,omitempty"`
+	LogExcerpt      string    `json:"logExcerpt,omitempty"`
+	RecentEvents    []string  `json:"recentEvents,omitempty"`
 	ReceivedAt      time.Time `json:"receivedAt"`
 }
 
@@ -77,6 +82,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			summary          TEXT NOT NULL,
 			recommendation   TEXT NOT NULL,
 			suppressed_count INT NOT NULL DEFAULT 0,
+			restarts         INT NOT NULL DEFAULT 0,
+			rollout_context  TEXT NOT NULL DEFAULT '',
+			log_excerpt      TEXT NOT NULL DEFAULT '',
+			recent_events    TEXT NOT NULL DEFAULT '[]',
 			received_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
 		CREATE INDEX IF NOT EXISTS idx_diagnoses_received_at ON diagnoses (received_at DESC);
@@ -87,10 +96,15 @@ func (s *Store) migrate(ctx context.Context) error {
 
 // Insert records one diagnosis.
 func (s *Store) Insert(ctx context.Context, d Diagnosis) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO diagnoses (cluster, namespace, pod, container, root_cause, confidence, summary, recommendation, suppressed_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, d.Cluster, d.Namespace, d.Pod, d.Container, d.RootCause, d.Confidence, d.Summary, d.Recommendation, d.SuppressedCount)
+	events, err := json.Marshal(d.RecentEvents)
+	if err != nil {
+		return fmt.Errorf("marshal recent events: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO diagnoses (cluster, namespace, pod, container, root_cause, confidence, summary, recommendation, suppressed_count, restarts, rollout_context, log_excerpt, recent_events)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+	`, d.Cluster, d.Namespace, d.Pod, d.Container, d.RootCause, d.Confidence, d.Summary, d.Recommendation,
+		d.SuppressedCount, d.Restarts, d.RolloutContext, d.LogExcerpt, string(events))
 	return err
 }
 
@@ -112,7 +126,7 @@ func (s *Store) List(ctx context.Context, f Filter) ([]Diagnosis, error) {
 		limit = defaultListLimit
 	}
 
-	query := `SELECT id, cluster, namespace, pod, container, root_cause, confidence, summary, recommendation, suppressed_count, received_at FROM diagnoses WHERE 1=1`
+	query := `SELECT id, cluster, namespace, pod, container, root_cause, confidence, summary, recommendation, suppressed_count, restarts, rollout_context, log_excerpt, recent_events, received_at FROM diagnoses WHERE 1=1`
 	var args []any
 	if f.Cluster != "" {
 		args = append(args, f.Cluster)
@@ -138,9 +152,16 @@ func (s *Store) List(ctx context.Context, f Filter) ([]Diagnosis, error) {
 	var out []Diagnosis
 	for rows.Next() {
 		var d Diagnosis
+		var eventsJSON string
 		if err := rows.Scan(&d.ID, &d.Cluster, &d.Namespace, &d.Pod, &d.Container, &d.RootCause,
-			&d.Confidence, &d.Summary, &d.Recommendation, &d.SuppressedCount, &d.ReceivedAt); err != nil {
+			&d.Confidence, &d.Summary, &d.Recommendation, &d.SuppressedCount, &d.Restarts,
+			&d.RolloutContext, &d.LogExcerpt, &eventsJSON, &d.ReceivedAt); err != nil {
 			return nil, err
+		}
+		if eventsJSON != "" {
+			if err := json.Unmarshal([]byte(eventsJSON), &d.RecentEvents); err != nil {
+				return nil, fmt.Errorf("unmarshal recent events: %w", err)
+			}
 		}
 		out = append(out, d)
 	}
