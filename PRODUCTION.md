@@ -82,18 +82,23 @@ helm upgrade poddoctor charts/poddoctor -n poddoctor-system \
 
 ## Step 5: Restrict Watch Scope (optional)
 
-By default PodDoctor watches Pods cluster-wide (needed for most real deployments — crashes happen in app namespaces, not just its own). To restrict it to one namespace instead:
+By default PodDoctor watches Pods cluster-wide (needed for most real deployments — crashes happen in app namespaces, not just its own). To restrict it to specific namespaces instead (comma-separated):
 
 ```bash
 helm upgrade poddoctor charts/poddoctor -n poddoctor-system --reuse-values \
   --set watchNamespace=my-app-namespace
+# or several:
+helm upgrade poddoctor charts/poddoctor -n poddoctor-system --reuse-values \
+  --set watchNamespace="team-a,team-b,team-c"
 ```
+
+This also bounds memory: the controller's Pod cache holds every watched Pod object in memory, so on a very large cluster (100k+ pods), narrowing `watchNamespace` to the namespaces that actually matter is worth doing even before RBAC concerns.
 
 Note: the ClusterRole is unchanged either way (cluster-wide read access is still granted) — this only restricts what the controller's cache watches, not what it's permitted to see. If you need namespace-scoped RBAC too, swap the Helm chart's ClusterRole/ClusterRoleBinding for a Role/RoleBinding in that namespace manually.
 
 ## Step 6: Network Policy (Zero-Trust)
 
-The operator only needs to reach the Kubernetes API server (for watches, log fetches, and event reads) — no other egress:
+The operator only needs to reach the Kubernetes API server (for watches, log fetches, and event reads) — no other egress, unless `notifications.webhookURL`/`notifications.routes` is configured, in which case add an egress rule for that destination (or the fleet hub's Service, if internal to the cluster):
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -291,7 +296,27 @@ Add a custom health check to `argocd-cm` so PodDoctor's own Deployment health re
                             └─────────────────┘
 ```
 
-Same chart everywhere, per-cluster `values-<env>.yaml` overrides (image tag, replica count, watchNamespace). Each cluster diagnoses its own failures independently — PodDoctor never talks cross-cluster.
+Same chart everywhere, per-cluster `values-<env>.yaml` overrides (image tag, replica count, watchNamespace, clusterName). Each cluster diagnoses its own failures independently — the diagnosis engine never talks cross-cluster.
+
+### Fleet-wide view (optional)
+
+Diagnosing is per-cluster, but *seeing* what's happening across a datacenter's worth of clusters shouldn't require N separate `kubectl get pd` sessions. Deploy `charts/poddoctor-hub` once, centrally (a management cluster, or wherever you'd run any other shared internal service), and point every cluster's `notifications.routes` (or plain `webhookURL`) at it:
+
+```
+┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+│  Dev Cluster   │  │  Staging       │  │  Production    │
+│  PodDoctor     │  │  PodDoctor     │  │  PodDoctor     │
+└───────┬────────┘  └───────┬────────┘  └───────┬────────┘
+        │ webhook           │ webhook           │ webhook
+        └───────────────────┼───────────────────┘
+                             ▼
+                   ┌───────────────────┐
+                   │  poddoctor-hub     │  (management cluster)
+                   │  + Postgres        │
+                   └───────────────────┘
+```
+
+See [README.md § Fleet Hub](README.md#fleet-hub-multi-cluster) for the install command. It's stateless HTTP in front of Postgres — no Kubernetes RBAC, so it doesn't need to run *in* any of the clusters it aggregates.
 
 ## Step 11: Backup & Recovery
 

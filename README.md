@@ -144,6 +144,8 @@ Each restart episode is diagnosed once (deduped on restart count) and re-diagnos
 
 Rollout timing is layered onto whichever primary cause is found (e.g. "OOMKilled — and also started right after a rollout"), or becomes the lead cause itself when nothing else matches.
 
+Node conditions are layered on too: if the pod's node currently reports `MemoryPressure`, `DiskPressure`, `PIDPressure`, or isn't `Ready`, that's noted in the summary — and an `OOMKilled` diagnosis on a node under `MemoryPressure` is upgraded to High confidence with a different recommendation ("check node allocatable memory and workload density" instead of "raise this pod's limits"), since the fix usually isn't in the pod spec.
+
 ---
 
 ## Custom Resource
@@ -200,13 +202,18 @@ Short name: `pd`
 | Helm value | Default | Description |
 |------------|---------|--------------|
 | `replicaCount` | `1` | Set ≥2 with `leaderElection.enabled=true` for HA |
-| `watchNamespace` | `""` (all namespaces) | Restrict the operator's Pod watch to one namespace |
+| `watchNamespace` | `""` (all namespaces) | Comma-separated namespaces to restrict the operator's Pod watch to |
+| `clusterName` | `""` | Identifies this cluster in outbound notifications — set it when feeding a fleet hub |
 | `diagnosis.logTailLines` | `50` | Lines of previous-container-instance logs fetched as evidence |
 | `diagnosis.rolloutWindow` | `10m` | How soon after a rollout a pod start still counts as rollout-correlated |
+| `diagnosis.evidenceQPS` | `20` | Max apiserver requests/sec spent gathering evidence — caps self-inflicted load during a mass crash-loop |
 | `metrics.serviceMonitor.enabled` | `false` | Create a `ServiceMonitor` for the Prometheus Operator |
 | `dashboard.enabled` | `true` | Serve the read-only HTML dashboard (`svc/<release>-dashboard`) |
 | `notifications.webhookURL` | `""` (disabled) | POST a notification for every new diagnosis — generic JSON or a Slack incoming webhook |
 | `notifications.webhookFormat` | `generic` | `generic` (JSON fields) or `slack` (Slack message text) |
+| `notifications.webhookToken` | `""` | Bearer token sent with `webhookURL` (e.g. a fleet hub's ingest token); passed via a Secret + env var, never a plain arg |
+| `notifications.groupWindow` | `2m` | Fold repeated diagnoses with the same namespace+root-cause into one notification within this window |
+| `notifications.routes` | `[]` | Route different namespaces to different webhooks instead of one global `webhookURL` — see [Notifications](#notifications) |
 | `podDisruptionBudget.enabled` | `false` | Create a PDB (recommended once `replicaCount > 1`) |
 | `installCRDs` | `true` | Render the CRD as part of this release (upgradable; `helm.sh/resource-policy: keep` protects it from `helm uninstall`) |
 
@@ -221,6 +228,43 @@ PodDoctor exposes controller-runtime's standard metrics (reconcile count/errors/
 ## Notifications
 
 Set `notifications.webhookURL` (Helm) or `--webhook-url` (flag) to get a best-effort POST for every new diagnosis — a generic JSON body by default, or Slack-formatted text with `notifications.webhookFormat=slack` / `--webhook-format=slack` pointed at a Slack incoming webhook URL. Notification failures are logged, not retried, and never fail the diagnosis itself.
+
+**Alert grouping.** A rollout that crash-loops hundreds of pods with the same root cause doesn't send hundreds of notifications: repeated diagnoses sharing a `(namespace, rootCause)` within `notifications.groupWindow` (default 2m) are folded into the next notification for that key as a `suppressedCount`, so you get "OOMKilled in payments (+47 more like this)" instead of 48 separate alerts.
+
+**Per-namespace routing.** For more than one destination — different teams' Slack channels, or a mix of team channels plus a [fleet hub](#fleet-hub-multi-cluster) — set `notifications.routes` instead of a single `webhookURL`:
+
+```yaml
+notifications:
+  routes:
+    - namespaces: ["payments", "checkout"]
+      webhookURL: "https://hooks.slack.com/services/..."
+      webhookFormat: slack
+    - namespaces: ["*"]          # catch-all fallback
+      webhookURL: "https://poddoctor-hub.mgmt.example.com/ingest"
+      webhookFormat: generic
+      webhookToken: "..."
+```
+
+Routes are checked in order, first match wins; `webhookURL`/`webhookFormat` at the top level become the fallback (`defaultWebhookURL`) if nothing matches. This renders as a Secret (routes may carry tokens) mounted at `/etc/poddoctor/notify-config.yaml` and passed via `--notify-config`, which takes over from `--webhook-url` entirely.
+
+## Fleet Hub (multi-cluster)
+
+A single global webhook doesn't give a fleet-wide view across many clusters. `cmd/hub` (chart: `charts/poddoctor-hub`) is a small central service, backed by Postgres, that every cluster's PodDoctor can point a notification route at:
+
+```bash
+helm install poddoctor-hub charts/poddoctor-hub -n poddoctor-hub --create-namespace \
+  --set database.dsn="postgres://user:pass@your-postgres:5432/poddoctor?sslmode=require" \
+  --set auth.token="$(openssl rand -hex 32)"
+```
+
+Then on each cluster's PodDoctor, add a catch-all route (or set it as the plain `webhookURL`) pointing at `http://<hub-service>.<namespace>.svc:8090/ingest` with the same token, and set `clusterName` so the hub can tell clusters apart. `helm install poddoctor-hub` prints the exact snippet in its `NOTES.txt`.
+
+The hub exposes:
+- `POST /ingest` — what each cluster's PodDoctor posts to (bearer-token authenticated).
+- `GET /api/diagnoses?cluster=&namespace=&rootCause=&limit=` — JSON, for building your own views.
+- `GET /` — an HTML dashboard across every cluster, with the same filters as query params.
+
+It doesn't touch the Kubernetes API at all (no RBAC needed) — it's a plain HTTP service in front of Postgres. Not exposed outside the cluster by default; enable `ingress.enabled` if clusters need to reach it over the internet rather than a private network.
 
 ---
 
@@ -249,16 +293,23 @@ See [`TESTING.md`](TESTING.md) for the full test matrix and [`PRODUCTION.md`](PR
 ```
 ├── api/v1alpha1/            PodDiagnosis CRD types + hand-maintained deepcopy
 ├── cmd/main.go               Operator entrypoint (manager, leader election, flags)
+├── cmd/hub/                   Fleet hub entrypoint (see charts/poddoctor-hub)
 ├── internal/diagnosis/       Pure rule-based root-cause engine (unit tested, no cluster deps)
 ├── internal/dashboard/       Small read-only HTML page over PodDiagnosis (stdlib html/template only)
 ├── internal/controller/      Reconciler: watches Pods, gathers evidence, writes PodDiagnosis
+├── internal/notify/           Webhook sending + per-namespace routing
+├── internal/alertgroup/        Storm dedup for repeated same-cause diagnoses
+├── internal/metrics/            poddoctor_diagnoses_total registration
+├── internal/hub/                  Fleet hub: Postgres store + HTTP API/dashboard
 ├── config/crd/                CRD manifest (kustomize path)
 ├── config/rbac/                ServiceAccount, ClusterRole, ClusterRoleBinding
 ├── config/manager/              Deployment (kustomize path)
 ├── config/samples/               Demo pods that reliably trigger each root cause
 ├── charts/poddoctor/              Helm chart (recommended deployment method)
+├── charts/poddoctor-hub/            Helm chart for the optional fleet hub
 ├── hack/                            E2E test script, boilerplate
-├── Dockerfile                        Multi-stage, distroless, non-root
+├── Dockerfile                        Multi-stage, distroless, non-root (operator)
+├── Dockerfile.hub                     Same, for the fleet hub
 ├── Taskfile.yaml                      All automation
 └── go.mod
 ```
@@ -270,8 +321,9 @@ See [`TESTING.md`](TESTING.md) for the full test matrix and [`PRODUCTION.md`](PR
 | Property | Detail |
 |----------|--------|
 | Container | Distroless, non-root (UID 65532), read-only fs, drop ALL caps, seccomp `RuntimeDefault` |
-| RBAC | No `secrets` access at all. Read-only on Pods/Events/ReplicaSets/Deployments/ControllerRevisions; write access limited to its own `poddiagnoses` CRD and Events |
-| Network | Egress is to the Kubernetes API server only, unless `notifications.webhookURL` is set, which adds egress to that one endpoint |
+| RBAC | No `secrets` access at all. Read-only on Pods/Nodes/Events/ReplicaSets/Deployments/ControllerRevisions; write access limited to its own `poddiagnoses` CRD and Events |
+| Network | Egress is to the Kubernetes API server only, unless notifications are configured, which adds egress to whatever webhook(s)/fleet hub are set |
+| Fleet hub | Separate service (`charts/poddoctor-hub`), no Kubernetes RBAC at all — plain HTTP + Postgres, gated by a shared bearer token |
 | HA | `leaderElection.enabled=true` (default), `replicaCount ≥ 2` |
 | Diagnosis engine | Fully offline, rule-based — no external API calls, works air-gapped |
 
@@ -287,6 +339,7 @@ See [`TESTING.md`](TESTING.md) for the full test matrix and [`PRODUCTION.md`](PR
 | Kubernetes client-go | 0.36.0 |
 | Kubernetes | 1.28+ |
 | Helm | 3.12+ |
+| Fleet hub datastore | Postgres (any recent version; `lib/pq` driver) |
 | Container image | `linux/amd64`, `linux/arm64` — published to `ghcr.io/<org>/poddoctor` on tagged releases |
 
 ---
