@@ -93,3 +93,99 @@ Or skip `kubectl` entirely and look at the built-in dashboard — a small read-o
 
 ```bash
 kubectl -n poddoctor-system port-forward svc/poddoctor-dashboard 8082:8082
+open http://localhost:8082
+```
+
+Remove it:
+
+```bash
+helm uninstall poddoctor -n poddoctor-system
+# CRD (and every PodDiagnosis) is kept — see charts/poddoctor/values.yaml `installCRDs`
+```
+
+---
+
+## Deployment Methods
+
+| Method | Best for | Command |
+|--------|----------|---------|
+| **Helm** | Production, upgrades, GitOps (Flux `HelmRelease`, ArgoCD) | `helm upgrade --install poddoctor charts/poddoctor -n poddoctor-system --create-namespace` |
+| **Kustomize** | GitOps shops that don't run Helm | `kubectl apply -k config/crd && kubectl apply -k config/default` |
+
+See [`PRODUCTION.md`](PRODUCTION.md) for HA, network policy, monitoring, and GitOps integration in detail.
+
+---
+
+## What Triggers a Diagnosis
+
+The controller watches Pods cluster-wide (configurable, see below) and reconciles only when a container's waiting-state reason is one of:
+
+- `CrashLoopBackOff`
+- `ImagePullBackOff` / `ErrImagePull`
+- `InvalidImageName`
+
+Each restart episode is diagnosed once (deduped on restart count) and re-diagnosed only when the restart count advances — so a pod stuck looping doesn't spam reconciles or rewrite its `PodDiagnosis` every resync.
+
+## Root Causes Detected
+
+| Root Cause | Signal | Confidence |
+|------------|--------|------------|
+| `OOMKilled` | Kubelet `OOMKilled` reason, or exit 137 + log text | High / Medium |
+| `ImagePullError` | `ImagePullBackOff` / `ErrImagePull` / `InvalidImageName` | High |
+| `BadCommand` | Exit 126 (not executable) / 127 (not found) | High |
+| `SegFault` | Exit 139 (SIGSEGV) | High |
+| `SignalKilled` | Exit 143 (SIGTERM) | Medium |
+| `ProbeFailure` | Recent `Unhealthy`/"probe failed" Event alongside a kill | High |
+| `RecentRolloutRegression` | Pod started within the rollout-correlation window of a new ReplicaSet | Medium |
+| `ApplicationError` | Any other non-zero exit | Medium |
+| `Unknown` | No matching signature | Low |
+
+Rollout timing is layered onto whichever primary cause is found (e.g. "OOMKilled — and also started right after a rollout"), or becomes the lead cause itself when nothing else matches.
+
+---
+
+## Custom Resource
+
+`PodDiagnosis` objects are **created and owned by the operator** — one per crash-looping pod, named after the pod, garbage-collected automatically when the pod is deleted (via `ownerReferences`). You don't write these; you read them.
+
+```yaml
+apiVersion: diagnostics.poddoctor.dev/v1alpha1
+kind: PodDiagnosis
+metadata:
+  name: payments-api-7d4b8f6c9-x2k4p
+  namespace: platform
+  ownerReferences:
+    - apiVersion: v1
+      kind: Pod
+      name: payments-api-7d4b8f6c9-x2k4p
+      controller: true
+spec:
+  podName: payments-api-7d4b8f6c9-x2k4p
+  podNamespace: platform
+  containerName: app
+status:
+  phase: Diagnosed
+  rootCause: OOMKilled
+  confidence: High
+  summary: Container exceeded its memory limit and was killed by the kernel OOM killer.
+  recommendation: Raise resources.limits.memory, or investigate a possible memory leak in the application.
+  exitCode: 137
+  terminationReason: OOMKilled
+  restartCount: 4
+  recentEvents:
+    - reason: BackOff
+      message: "Back-off restarting failed container"
+      count: 4
+  logExcerpt: "...tail of the crashed container's previous logs..."
+  firstObserved: "2026-07-16T10:02:11Z"
+  lastObserved: "2026-07-16T10:14:03Z"
+```
+
+### kubectl columns
+
+```
+$ kubectl get pd -A
+NAMESPACE   NAME                             POD                              ROOT CAUSE      CONFIDENCE   RESTARTS   AGE
+platform    payments-api-7d4b8f6c9-x2k4p     payments-api-7d4b8f6c9-x2k4p     OOMKilled       High         4          12m
+```
+
