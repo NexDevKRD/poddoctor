@@ -136,3 +136,72 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
+          go-version: '1.26'
+      - run: go test ./... -v -coverprofile=cover.out
+      - run: go tool cover -func=cover.out
+
+  build:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: task build
+      - run: docker build -t poddoctor:ci .
+
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint charts/poddoctor
+      - run: helm template poddoctor charts/poddoctor > /dev/null
+      - run: task crd:diff   # fails if the Helm CRD template drifted from config/crd/bases
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [build, helm-lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: poddoctor-test
+      - run: |
+          docker build -t poddoctor:ci .
+          kind load docker-image poddoctor:ci --name poddoctor-test
+          helm upgrade --install poddoctor charts/poddoctor \
+            -n poddoctor-system --create-namespace \
+            --set image.repository=poddoctor --set image.tag=ci --set image.pullPolicy=IfNotPresent \
+            --wait
+          task test:e2e
+```
+
+## Writing New Tests
+
+For a new diagnosis rule, add a case to the table in `internal/diagnosis/rules_test.go`:
+
+```go
+{
+    name: "descriptive name of the failure signature",
+    ev:   Evidence{HasTerminated: true, ExitCode: 42 /* whatever triggers the new rule */},
+    want: diagv1alpha1.RootCauseSomethingNew,
+},
+```
+
+For a new controller behavior (new evidence source, new dedup condition), add a case to `internal/controller/poddiagnosis_controller_test.go` following the existing `newReconciler`/fake-object pattern.
+
+Naming convention:
+- Diagnosis engine test names describe the *failure signature* being matched.
+- Controller test names describe the *reconcile behavior* being verified.
+
+## Troubleshooting Tests
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `go: module not found` | Missing `go mod tidy` | Run `go mod tidy` |
+| Test passes locally, fails in CI | Go version mismatch | Pin Go 1.26 in CI |
+| `PodDiagnosisStatus has no field or method DeepCopyInto` | `zz_generated.deepcopy.go` regenerated without the `+kubebuilder:object:generate=true` marker in `groupversion_info.go` | Keep the marker; verify with `task generate` then `go build ./...` before committing |
+| E2E test times out waiting for diagnosis | Operator not actually watching that namespace, or RBAC denies `pods/log` | Check `watchNamespace` value and `kubectl auth can-i get pods/log --as=system:serviceaccount:poddoctor-system:poddoctor` |
+| `crd:diff` fails | Someone edited `config/crd/bases/*.yaml` or `charts/poddoctor/templates/crd.yaml` without updating the other | Apply the same schema change to both files |
