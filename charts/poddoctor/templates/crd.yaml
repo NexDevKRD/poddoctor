@@ -108,3 +108,59 @@ spec:
                 recommendation:
                   type: string
                   description: Recommendation is a suggested next step to resolve the failure.
+                exitCode:
+                  type: integer
+                  format: int32
+                  nullable: true
+                  description: ExitCode is the container's last exit code, if it ever terminated.
+                terminationReason:
+                  type: string
+                  description: |-
+                    TerminationReason is the raw Kubernetes termination/waiting reason
+                    (e.g. OOMKilled, Error, CrashLoopBackOff, ImagePullBackOff).
+                restartCount:
+                  type: integer
+                  format: int32
+                  description: RestartCount is the container restart count at last diagnosis.
+                lastDiagnosedRestartCount:
+                  type: integer
+                  format: int32
+                  description: |-
+                    LastDiagnosedRestartCount is the restart count already diagnosed,
+                    used to avoid re-diagnosing the same failure episode.
+                recentEvents:
+                  type: array
+                  description: RecentEvents are the most recent Kubernetes Events for the pod, used as evidence.
+                  items:
+                    type: object
+                    required:
+                      - reason
+                      - message
+                    properties:
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      count:
+                        type: integer
+                        format: int32
+                      lastTimestamp:
+                        type: string
+                        format: date-time
+                logExcerpt:
+                  type: string
+                  description: LogExcerpt is the tail of the previous container instance's logs, truncated.
+                rolloutContext:
+                  type: string
+                  description: RolloutContext describes a recent Deployment rollout correlated with the failure, if any.
+                firstObserved:
+                  type: string
+                  format: date-time
+                  description: FirstObserved is when this failure episode was first diagnosed.
+                lastObserved:
+                  type: string
+                  format: date-time
+                  description: LastObserved is when this diagnosis was last updated.
+          required:
+            - spec
+{{- end }}
