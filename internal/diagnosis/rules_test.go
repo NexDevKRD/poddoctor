@@ -54,3 +54,60 @@ func TestDiagnose(t *testing.T) {
 		},
 		{
 			name: "runtime start error via waiting reason (first restart)",
+			ev:   Evidence{WaitingReason: "RunContainerError", WaitingMessage: `exec: "/bin/does-not-exist": stat /bin/does-not-exist: no such file or directory`},
+			want: diagv1alpha1.RootCauseBadCommand,
+		},
+		{
+			name: "runtime start error via termination reason (steady-state CrashLoopBackOff)",
+			ev: Evidence{
+				WaitingReason:     "CrashLoopBackOff",
+				HasTerminated:     true,
+				TerminatedReason:  "StartError",
+				TerminatedMessage: `exec: "/bin/does-not-exist": stat /bin/does-not-exist: no such file or directory`,
+				ExitCode:          128,
+			},
+			want: diagv1alpha1.RootCauseBadCommand,
+		},
+		{
+			name: "generic application error",
+			ev:   Evidence{HasTerminated: true, ExitCode: 1},
+			want: diagv1alpha1.RootCauseApplicationError,
+		},
+		{
+			name: "no signal at all",
+			ev:   Evidence{},
+			want: diagv1alpha1.RootCauseUnknown,
+		},
+		{
+			name: "unknown but recent rollout becomes the lead",
+			ev:   Evidence{RecentRollout: true, RolloutContext: "started 45s after deployment/api rolled to revision 12"},
+			want: diagv1alpha1.RootCauseRecentRollout,
+		},
+		{
+			name: "probe failure overrides sigterm",
+			ev: Evidence{
+				HasTerminated: true,
+				ExitCode:      143,
+				RecentEvents: []diagv1alpha1.EvidenceEvent{
+					{Reason: "Unhealthy", Message: "Liveness probe failed: HTTP probe failed with statuscode: 500"},
+				},
+			},
+			want: diagv1alpha1.RootCauseProbeFailure,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Diagnose(tc.ev)
+			if got.RootCause != tc.want {
+				t.Fatalf("RootCause = %s, want %s (summary=%q)", got.RootCause, tc.want, got.Summary)
+			}
+			if got.Summary == "" {
+				t.Fatalf("expected non-empty summary")
+			}
+			if got.Confidence == "" {
+				t.Fatalf("expected confidence to always be set")
+			}
+		})
+	}
+}
