@@ -1,0 +1,55 @@
+{{- if .Values.installCRDs }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: poddiagnoses.diagnostics.poddoctor.dev
+  annotations:
+    # Keep the CRD (and every PodDiagnosis it defines) on `helm uninstall`.
+    # Deleting a CRD deletes all its custom resources cluster-wide; that's
+    # rarely what an uninstall means. Remove manually if truly needed:
+    #   kubectl delete crd poddiagnoses.diagnostics.poddoctor.dev
+    helm.sh/resource-policy: keep
+spec:
+  group: diagnostics.poddoctor.dev
+  names:
+    kind: PodDiagnosis
+    listKind: PodDiagnosisList
+    plural: poddiagnoses
+    singular: poddiagnosis
+    shortNames:
+      - pd
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Pod
+          type: string
+          jsonPath: .spec.podName
+        - name: Root Cause
+          type: string
+          jsonPath: .status.rootCause
+        - name: Confidence
+          type: string
+          jsonPath: .status.confidence
+        - name: Restarts
+          type: integer
+          jsonPath: .status.restartCount
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: |-
+            PodDiagnosis is the Schema for the poddiagnoses API. Each instance holds
+            the operator's root-cause analysis for one crash-looping Pod container.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
