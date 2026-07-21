@@ -49,6 +49,10 @@ spec:
             {{- if .Values.clusterName }}
             - --cluster-name={{ .Values.clusterName }}
             {{- end }}
+            {{- if and .Values.tracing.grafanaURL .Values.tracing.tempoDatasourceUID }}
+            - --grafana-url={{ .Values.tracing.grafanaURL }}
+            - --tempo-datasource-uid={{ .Values.tracing.tempoDatasourceUID }}
+            {{- end }}
             {{- if .Values.notifications.groupWindow }}
             - --alert-group-window={{ .Values.notifications.groupWindow }}
             {{- end }}

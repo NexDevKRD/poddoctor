@@ -28,6 +28,14 @@ service:
   type: ClusterIP
   port: 8090
 
+# tracing adds a "View Traces" link on each diagnosis, deep-linking into
+# Grafana Explore with a TraceQL query for that pod. The hub doesn't
+# collect or store traces itself — this just points at your existing
+# Tempo + Grafana. Leave empty to disable (the default).
+tracing:
+  grafanaURL: ""
+  tempoDatasourceUID: ""
+
 # Only enable if the hub should be reachable from outside the cluster
 # (e.g. clusters posting to it over the internet, or ops browsing the
 # dashboard). Otherwise use kubectl port-forward.

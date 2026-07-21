@@ -35,6 +35,10 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --listen-address=:{{ .Values.service.port }}
+            {{- if and .Values.tracing.grafanaURL .Values.tracing.tempoDatasourceUID }}
+            - --grafana-url={{ .Values.tracing.grafanaURL }}
+            - --tempo-datasource-uid={{ .Values.tracing.tempoDatasourceUID }}
+            {{- end }}
           env:
             - name: DATABASE_URL
               valueFrom:

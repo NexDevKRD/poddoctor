@@ -35,6 +35,18 @@ diagnosis:
 # notifications feed a central fleet hub aggregating multiple clusters.
 clusterName: ""
 
+# tracing adds a "View Traces" link on each diagnosis, deep-linking into
+# Grafana Explore with a TraceQL query for that pod. PodDoctor doesn't
+# collect or store traces itself — this just points at your existing
+# Tempo + Grafana (or Grafana Cloud). Requires your applications to be
+# instrumented with OpenTelemetry and exporting to Tempo. Leave empty to
+# disable (the default — no link shown).
+tracing:
+  grafanaURL: ""
+  # UID of the Tempo datasource in Grafana: Grafana admin > Connections >
+  # Data sources > (your Tempo datasource) > the "uid" in the URL.
+  tempoDatasourceUID: ""
+
 resources:
   requests:
     cpu: 10m

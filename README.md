@@ -263,9 +263,32 @@ Then on each cluster's PodDoctor, add a catch-all route (or set it as the plain 
 The hub exposes:
 - `POST /ingest` — what each cluster's PodDoctor posts to (bearer-token authenticated).
 - `GET /api/diagnoses?cluster=&namespace=&rootCause=&limit=` — JSON, for building your own views.
-- `GET /` — an HTML dashboard across every cluster, with the same filters as query params.
+- `GET /` — the same dashboard SPA as the per-cluster one (see below), across every cluster.
 
 It doesn't touch the Kubernetes API at all (no RBAC needed) — it's a plain HTTP service in front of Postgres. Not exposed outside the cluster by default; enable `ingress.enabled` if clusters need to reach it over the internet rather than a private network.
+
+---
+
+## Distributed Tracing (optional)
+
+PodDoctor tells you a container's OOMKilled or crash-looping. It doesn't tell you what the *request* was doing across your other services when it happened — that's distributed tracing's job, and [Tempo](https://grafana.com/oss/tempo/) + [Grafana](https://grafana.com/oss/grafana/) already do it well. PodDoctor doesn't collect, store, or render traces itself; it just adds a **View Traces** link on each diagnosis that deep-links into Grafana Explore, pre-filtered to that pod via a TraceQL query.
+
+Prerequisites (not part of this repo — install via their own Helm charts):
+1. [Tempo](https://grafana.com/docs/tempo/latest/setup/helm-chart/) receiving OTLP traces from your (OpenTelemetry-instrumented) applications.
+2. [Grafana](https://grafana.com/docs/grafana/latest/setup-grafana/installation/helm/) with a Tempo datasource configured.
+3. The Tempo datasource's UID — Grafana admin → Connections → Data sources → your Tempo datasource → the `uid` in the URL.
+
+Then, on the operator and/or hub chart:
+
+```bash
+helm upgrade poddoctor charts/poddoctor -n poddoctor-system --reuse-values \
+  --set tracing.grafanaURL="https://grafana.example.com" \
+  --set tracing.tempoDatasourceUID="<uid-from-step-3>"
+```
+
+Every diagnosis's expanded detail then shows a **View traces in Grafana** link running `{resource.k8s.namespace.name="<ns>" && resource.k8s.pod.name="<pod>"}` over the last hour. Only traces from apps actually emitting OTel resource attributes (`k8s.namespace.name`, `k8s.pod.name` — added automatically by the OpenTelemetry Collector's `k8sattributes` processor, or by most auto-instrumentation) will show up; PodDoctor doesn't add these itself.
+
+Leave `tracing.grafanaURL` unset (the default) to not show the link at all.
 
 ---
 
