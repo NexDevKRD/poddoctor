@@ -37,6 +37,14 @@ metrics:
     interval: 30s
     labels: {}
 
+notifications:
+  # Best-effort POST for every new diagnosis. Leave empty to disable.
+  # A Slack incoming-webhook URL is a secret — prefer `--set` or a separate
+  # untracked values file over committing it here.
+  webhookURL: ""
+  # "generic" (JSON fields) or "slack" (Slack incoming-webhook text).
+  webhookFormat: generic
+
 # Small read-only HTML page listing every PodDiagnosis, newest first.
 # Not exposed outside the cluster by default — use:
 #   kubectl -n <namespace> port-forward svc/<release>-dashboard 8082:8082

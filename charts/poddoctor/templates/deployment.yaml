@@ -43,6 +43,10 @@ spec:
             {{- if .Values.watchNamespace }}
             - --namespace={{ .Values.watchNamespace }}
             {{- end }}
+            {{- if .Values.notifications.webhookURL }}
+            - --webhook-url={{ .Values.notifications.webhookURL }}
+            - --webhook-format={{ .Values.notifications.webhookFormat }}
+            {{- end }}
           ports:
             - containerPort: 8081
               name: health

@@ -22,6 +22,7 @@ import (
 	v1alpha1 "github.com/chenar/poddoctor/api/v1alpha1"
 	"github.com/chenar/poddoctor/internal/controller"
 	"github.com/chenar/poddoctor/internal/dashboard"
+	"github.com/chenar/poddoctor/internal/notify"
 )
 
 var (
@@ -42,6 +43,8 @@ func main() {
 	var logTailLines int64
 	var rolloutWindow time.Duration
 	var dashboardAddr string
+	var webhookURL string
+	var webhookFormat string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -56,6 +59,10 @@ func main() {
 		"How soon after a Deployment rollout a pod start is still considered rollout-correlated.")
 	flag.StringVar(&dashboardAddr, "dashboard-bind-address", ":8082",
 		"The address the read-only HTML dashboard binds to. Set to \"0\" to disable it.")
+	flag.StringVar(&webhookURL, "webhook-url", "",
+		"If set, POST a notification to this URL for every new diagnosis (e.g. a Slack incoming webhook).")
+	flag.StringVar(&webhookFormat, "webhook-format", "generic",
+		"Webhook payload format: \"generic\" (JSON fields) or \"slack\" (Slack incoming-webhook text).")
 
 	opts := zap.Options{
 		Development: true,
@@ -106,13 +113,22 @@ func main() {
 		Recorder:      mgr.GetEventRecorder("poddoctor-controller"),
 		LogTailLines:  logTailLines,
 		RolloutWindow: rolloutWindow,
+		WebhookURL:    webhookURL,
+		WebhookFormat: notify.Format(webhookFormat),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PodDiagnosis")
 		os.Exit(1)
 	}
 
 	if dashboardAddr != "0" {
-		srv := &http.Server{Addr: dashboardAddr, Handler: dashboard.Handler(mgr.GetAPIReader())}
+		srv := &http.Server{
+			Addr:              dashboardAddr,
+			Handler:           dashboard.Handler(mgr.GetAPIReader()),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 			errCh := make(chan error, 1)
 			go func() { errCh <- srv.ListenAndServe() }()
