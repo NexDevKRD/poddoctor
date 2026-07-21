@@ -36,11 +36,15 @@ func TestSend_Generic(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Send(context.Background(), srv.URL, FormatGeneric, testDiag()); err != nil {
+	n := Notification{Diag: testDiag(), Cluster: "us-east-1", SuppressedCount: 4}
+	if err := Send(context.Background(), srv.URL, FormatGeneric, "", n); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 	if got.Pod != "payments-api-abc123" || got.RootCause != "OOMKilled" {
 		t.Fatalf("unexpected payload: %+v", got)
+	}
+	if got.Cluster != "us-east-1" || got.SuppressedCount != 4 {
+		t.Fatalf("expected cluster/suppressedCount to round-trip, got %+v", got)
 	}
 }
 
@@ -54,7 +58,8 @@ func TestSend_Slack(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Send(context.Background(), srv.URL, FormatSlack, testDiag()); err != nil {
+	n := Notification{Diag: testDiag()}
+	if err := Send(context.Background(), srv.URL, FormatSlack, "", n); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 	if got["text"] == "" {
@@ -68,7 +73,25 @@ func TestSend_NonOKStatusIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Send(context.Background(), srv.URL, FormatGeneric, testDiag()); err == nil {
+	n := Notification{Diag: testDiag()}
+	if err := Send(context.Background(), srv.URL, FormatGeneric, "", n); err == nil {
 		t.Fatal("expected error on non-2xx response, got nil")
+	}
+}
+
+func TestSend_SetsBearerToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := Notification{Diag: testDiag()}
+	if err := Send(context.Background(), srv.URL, FormatGeneric, "s3cr3t", n); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if gotAuth != "Bearer s3cr3t" {
+		t.Fatalf("Authorization header = %q, want %q", gotAuth, "Bearer s3cr3t")
 	}
 }

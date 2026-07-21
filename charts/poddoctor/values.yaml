@@ -20,6 +20,15 @@ diagnosis:
   logTailLines: 50
   # How soon after a Deployment rollout a pod start is still considered rollout-correlated.
   rolloutWindow: 10m
+  # Max apiserver requests/sec spent gathering evidence (Events search,
+  # previous logs). Protects the apiserver from a self-inflicted request
+  # storm when a bad rollout crash-loops many pods at once.
+  evidenceQPS: 20
+
+# clusterName identifies this cluster in outbound notifications
+# (notifications.webhookURL / notify-config routes) — set it when
+# notifications feed a central fleet hub aggregating multiple clusters.
+clusterName: ""
 
 resources:
   requests:
@@ -40,10 +49,30 @@ metrics:
 notifications:
   # Best-effort POST for every new diagnosis. Leave empty to disable.
   # A Slack incoming-webhook URL is a secret — prefer `--set` or a separate
-  # untracked values file over committing it here.
+  # untracked values file over committing it here. Ignored if `routes` below
+  # is non-empty (routes take over as the full config, this becomes just
+  # their fallback via defaultWebhookURL).
   webhookURL: ""
   # "generic" (JSON fields) or "slack" (Slack incoming-webhook text).
   webhookFormat: generic
+  # Bearer token sent with webhookURL (e.g. a fleet hub's ingest token).
+  webhookToken: ""
+  # Repeated diagnoses with the same namespace+root-cause within this
+  # window are folded into one notification, so a mass crash-loop sends
+  # one alert instead of hundreds.
+  groupWindow: 2m
+  # Route different namespaces to different webhooks (e.g. per-team Slack
+  # channels, or a mix of team channels + a central fleet hub) instead of
+  # one global webhookURL/webhookToken above.
+  routes: []
+  # routes:
+  #   - namespaces: ["payments", "checkout"]
+  #     webhookURL: "https://hooks.slack.com/services/..."
+  #     webhookFormat: slack
+  #   - namespaces: ["*"]
+  #     webhookURL: "https://poddoctor-hub.mgmt.example.com/ingest"
+  #     webhookFormat: generic
+  #     webhookToken: "..."
 
 # Small read-only HTML page listing every PodDiagnosis, newest first.
 # Not exposed outside the cluster by default — use:

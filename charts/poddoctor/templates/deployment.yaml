@@ -39,14 +39,37 @@ spec:
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --log-tail-lines={{ .Values.diagnosis.logTailLines }}
             - --rollout-window={{ .Values.diagnosis.rolloutWindow }}
+            - --evidence-qps={{ .Values.diagnosis.evidenceQPS }}
             - --dashboard-bind-address={{ if .Values.dashboard.enabled }}:{{ .Values.dashboard.port }}{{ else }}0{{ end }}
             {{- if .Values.watchNamespace }}
             - --namespace={{ .Values.watchNamespace }}
             {{- end }}
-            {{- if .Values.notifications.webhookURL }}
+            {{- if .Values.clusterName }}
+            - --cluster-name={{ .Values.clusterName }}
+            {{- end }}
+            {{- if .Values.notifications.groupWindow }}
+            - --alert-group-window={{ .Values.notifications.groupWindow }}
+            {{- end }}
+            {{- if .Values.notifications.routes }}
+            - --notify-config=/etc/poddoctor/notify-config.yaml
+            {{- else if .Values.notifications.webhookURL }}
             - --webhook-url={{ .Values.notifications.webhookURL }}
             - --webhook-format={{ .Values.notifications.webhookFormat }}
             {{- end }}
+          {{- if and .Values.notifications.webhookToken (not .Values.notifications.routes) }}
+          env:
+            - name: PODDOCTOR_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "poddoctor.fullname" . }}-webhook-token
+                  key: token
+          {{- end }}
+          {{- if .Values.notifications.routes }}
+          volumeMounts:
+            - name: notify-config
+              mountPath: /etc/poddoctor
+              readOnly: true
+          {{- end }}
           ports:
             - containerPort: 8081
               name: health
@@ -77,6 +100,12 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+      {{- if .Values.notifications.routes }}
+      volumes:
+        - name: notify-config
+          secret:
+            secretName: {{ include "poddoctor.fullname" . }}-notify-config
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
