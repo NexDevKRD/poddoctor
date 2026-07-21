@@ -1,0 +1,17 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "poddoctor.fullname" . }}-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "poddoctor.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "poddoctor.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: dashboard
+      port: {{ .Values.dashboard.port }}
+      targetPort: dashboard
+      protocol: TCP
+{{- end }}
