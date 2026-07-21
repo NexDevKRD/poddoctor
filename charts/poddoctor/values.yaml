@@ -1,0 +1,80 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/chenar/poddoctor
+  tag: ""  # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# watchNamespace restricts the operator to a single namespace's Pods.
+# Empty (default) watches all namespaces cluster-wide.
+watchNamespace: ""
+
+leaderElection:
+  # Required for >1 replica so only one instance reconciles at a time.
+  enabled: true
+
+diagnosis:
+  # Lines of previous-container-instance log fetched as evidence per episode.
+  logTailLines: 50
+  # How soon after a Deployment rollout a pod start is still considered rollout-correlated.
+  rolloutWindow: 10m
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+metrics:
+  enabled: true
+  port: 8080
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+# Small read-only HTML page listing every PodDiagnosis, newest first.
+# Not exposed outside the cluster by default — use:
+#   kubectl -n <namespace> port-forward svc/<release>-dashboard 8082:8082
+dashboard:
+  enabled: true
+  port: 8082
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+# installCRDs renders the PodDiagnosis CRD as part of this release, so
+# `helm upgrade` also upgrades the CRD schema. The CRD carries
+# helm.sh/resource-policy: keep, so `helm uninstall` leaves it (and every
+# PodDiagnosis it defines) in place rather than deleting them cluster-wide.
+installCRDs: true
