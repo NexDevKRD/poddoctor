@@ -57,3 +57,62 @@ if wait_for_diagnosis demo-oomkilled 120; then
   assert_not_empty "demo-oomkilled has confidence" "$CONFIDENCE"
 
   SUMMARY=$(kubectl get pd demo-oomkilled -o jsonpath='{.status.summary}')
+  assert_not_empty "demo-oomkilled has summary" "$SUMMARY"
+else
+  echo "FAIL: demo-oomkilled was never diagnosed within timeout"
+  FAIL=$((FAIL+1))
+fi
+echo ""
+
+echo "--- Test 2: bad image ref is diagnosed as ImagePullError ---"
+kubectl apply -f config/samples/demo-imagepull-error.yaml
+if wait_for_diagnosis demo-image-pull-error 60; then
+  ROOTCAUSE=$(kubectl get pd demo-image-pull-error -o jsonpath='{.status.rootCause}')
+  assert_eq "demo-image-pull-error root cause" "ImagePullError" "$ROOTCAUSE"
+else
+  echo "FAIL: demo-image-pull-error was never diagnosed within timeout"
+  FAIL=$((FAIL+1))
+fi
+echo ""
+
+echo "--- Test 3: bad command is diagnosed as BadCommand ---"
+kubectl apply -f config/samples/demo-bad-command.yaml
+if wait_for_diagnosis demo-bad-command 90; then
+  ROOTCAUSE=$(kubectl get pd demo-bad-command -o jsonpath='{.status.rootCause}')
+  assert_eq "demo-bad-command root cause" "BadCommand" "$ROOTCAUSE"
+else
+  echo "FAIL: demo-bad-command was never diagnosed within timeout"
+  FAIL=$((FAIL+1))
+fi
+echo ""
+
+echo "--- Test 4: PodDiagnosis is owned by the Pod (garbage collected with it) ---"
+OWNER_KIND=$(kubectl get pd demo-oomkilled -o jsonpath='{.metadata.ownerReferences[0].kind}')
+assert_eq "demo-oomkilled owned by Pod" "Pod" "$OWNER_KIND"
+echo ""
+
+echo "--- Test 5: kubectl short name and printer columns work ---"
+kubectl get pd > /dev/null 2>&1
+assert_eq "kubectl get pd works" "0" "$?"
+
+OUTPUT=$(kubectl get pd demo-oomkilled --no-headers)
+echo "$OUTPUT" | grep -q "OOMKilled" && echo "PASS: Root Cause column visible" && PASS=$((PASS+1)) || { echo "FAIL: Root Cause column not visible"; FAIL=$((FAIL+1)); }
+echo ""
+
+echo "--- Cleanup ---"
+kubectl delete -f config/samples/demo-oomkilled.yaml --ignore-not-found
+kubectl delete -f config/samples/demo-imagepull-error.yaml --ignore-not-found
+kubectl delete -f config/samples/demo-bad-command.yaml --ignore-not-found
+echo ""
+
+echo "=== Results ==="
+echo "PASS: $PASS"
+echo "FAIL: $FAIL"
+echo ""
+
+if [ "$FAIL" -gt 0 ]; then
+  echo "E2E TESTS FAILED"
+  exit 1
+fi
+
+echo "ALL E2E TESTS PASSED"
