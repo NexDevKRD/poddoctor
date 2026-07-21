@@ -125,3 +125,130 @@ kind: ResourceQuota
 metadata:
   name: poddoctor-quota
   namespace: poddoctor-system
+spec:
+  hard:
+    pods: "4"
+    requests.cpu: "200m"
+    requests.memory: "256Mi"
+    limits.cpu: "600m"
+    limits.memory: "1Gi"
+```
+
+## Step 8: Monitoring (Prometheus)
+
+Enable the ServiceMonitor if you run the Prometheus Operator:
+
+```bash
+helm upgrade poddoctor charts/poddoctor -n poddoctor-system --reuse-values \
+  --set metrics.serviceMonitor.enabled=true
+```
+
+PodDoctor exposes controller-runtime's standard metrics — reconcile counts/errors/duration and workqueue depth — plus standard Go/process metrics. No custom metrics were added; these are enough to alert on operator health without adding maintenance surface.
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: poddoctor-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: poddoctor
+      rules:
+        - alert: PodDoctorReconcileErrors
+          expr: |
+            rate(controller_runtime_reconcile_errors_total{controller="poddiagnosis"}[10m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PodDoctor is failing to reconcile ({{ $value }} errors/s)"
+
+        - alert: PodDoctorDown
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace="poddoctor-system"
+            } == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "PodDoctor has no available replicas — crash loops are going undiagnosed"
+
+        - alert: HighConfidenceCrashLoopDetected
+          expr: |
+            kube_customresource_status_condition{
+              group="diagnostics.poddoctor.dev",
+              confidence="High"
+            } > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PodDoctor diagnosed a high-confidence failure: {{ $labels.exported_namespace }}/{{ $labels.name }}"
+```
+
+`HighConfidenceCrashLoopDetected` depends on `kube-state-metrics`' generic CRD metric support (`kube_customresource_status_*`) being configured for the `poddiagnoses` CRD; enable it via kube-state-metrics' `--custom-resource-state-config` if you want that specific alert.
+
+## Step 9: GitOps Integration
+
+### FluxCD (HelmRelease)
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: poddoctor
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: https://github.com/your-org/poddoctor
+  ref:
+    tag: v0.1.0
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: poddoctor
+  namespace: poddoctor-system
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: charts/poddoctor
+      sourceRef:
+        kind: GitRepository
+        name: poddoctor
+        namespace: flux-system
+  values:
+    image:
+      repository: ghcr.io/your-org/poddoctor
+      tag: v0.1.0
+    replicaCount: 2
+    podDisruptionBudget:
+      enabled: true
+```
+
+### ArgoCD
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: poddoctor
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/your-org/poddoctor
+    targetRevision: v0.1.0
+    path: charts/poddoctor
+    helm:
+      values: |
+        image:
+          repository: ghcr.io/your-org/poddoctor
+          tag: v0.1.0
+        replicaCount: 2
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: poddoctor-system
