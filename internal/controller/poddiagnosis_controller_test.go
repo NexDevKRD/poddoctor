@@ -2,6 +2,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	diagv1alpha1 "github.com/chenar/poddoctor/api/v1alpha1"
+	"github.com/chenar/poddoctor/internal/alertgroup"
+	"github.com/chenar/poddoctor/internal/notify"
 )
 
 func newTestScheme(t *testing.T) *runtime.Scheme {
@@ -289,5 +295,102 @@ func TestReconcile_RolloutContext_StatefulSet(t *testing.T) {
 	}
 	if diag.Status.RolloutContext == "" {
 		t.Fatalf("expected RolloutContext to be set for pod started shortly after StatefulSet revision rollout")
+	}
+}
+
+func TestReconcile_NodeMemoryPressureEvidence(t *testing.T) {
+	scheme := newTestScheme(t)
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionTrue},
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	pod := oomKilledPod()
+	pod.Spec.NodeName = node.Name
+	r := newReconciler(t, scheme, pod, node)
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	diagKey := client.ObjectKey{Namespace: pod.Namespace, Name: diagnosisName(pod.Name, "app")}
+	var diag diagv1alpha1.PodDiagnosis
+	if err := r.Get(ctx, diagKey, &diag); err != nil {
+		t.Fatalf("get diagnosis: %v", err)
+	}
+	if diag.Status.Confidence != diagv1alpha1.ConfidenceHigh {
+		t.Fatalf("Confidence = %s, want High (node MemoryPressure should upgrade an OOMKilled diagnosis)", diag.Status.Confidence)
+	}
+}
+
+func TestReconcile_SendsWebhookNotification(t *testing.T) {
+	scheme := newTestScheme(t)
+	var received int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		atomic.AddInt32(&received, 1)
+		var p notify.Payload
+		if err := json.NewDecoder(req.Body).Decode(&p); err != nil {
+			t.Errorf("decode webhook body: %v", err)
+		}
+		if p.Cluster != "us-east-1" {
+			t.Errorf("Cluster = %q, want us-east-1", p.Cluster)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	pod := oomKilledPod()
+	r := newReconciler(t, scheme, pod)
+	r.ClusterName = "us-east-1"
+	r.NotifyRouter = notify.NewRouter(srv.URL, notify.FormatGeneric, "", nil)
+	r.Grouper = alertgroup.New(time.Minute)
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if got := atomic.LoadInt32(&received); got != 1 {
+		t.Fatalf("webhook calls = %d, want 1", got)
+	}
+}
+
+func TestReconcile_GroupsRepeatedNotifications(t *testing.T) {
+	scheme := newTestScheme(t)
+	var received int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		atomic.AddInt32(&received, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	router := notify.NewRouter(srv.URL, notify.FormatGeneric, "", nil)
+	grouper := alertgroup.New(time.Minute)
+	ctx := context.Background()
+
+	// Two different pods, same namespace + root cause: the second should
+	// be folded into the first's notification (grouped), not send its own.
+	for i, name := range []string{"payments-api-a", "payments-api-b"} {
+		pod := oomKilledPod()
+		pod.Name = name
+		r := newReconciler(t, scheme, pod)
+		r.NotifyRouter = router
+		r.Grouper = grouper
+
+		req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)}
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile() #%d error = %v", i, err)
+		}
+	}
+
+	if got := atomic.LoadInt32(&received); got != 1 {
+		t.Fatalf("webhook calls = %d, want 1 (second occurrence should be grouped/suppressed)", got)
 	}
 }

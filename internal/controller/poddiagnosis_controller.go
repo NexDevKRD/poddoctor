@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"golang.org/x/time/rate"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	diagv1alpha1 "github.com/chenar/poddoctor/api/v1alpha1"
+	"github.com/chenar/poddoctor/internal/alertgroup"
 	"github.com/chenar/poddoctor/internal/diagnosis"
 	"github.com/chenar/poddoctor/internal/metrics"
 	"github.com/chenar/poddoctor/internal/notify"
@@ -63,10 +65,28 @@ type PodDiagnosisReconciler struct {
 	LogTailLines  int64
 	RolloutWindow time.Duration
 
-	// WebhookURL, if set, receives a best-effort POST for every new
-	// diagnosis (see internal/notify). Empty disables notifications.
-	WebhookURL    string
-	WebhookFormat notify.Format
+	// ClusterName identifies this cluster in outbound notifications (see
+	// internal/notify.Payload.Cluster) — set it when notifications feed a
+	// fleet hub aggregating multiple clusters.
+	ClusterName string
+
+	// NotifyRouter picks the webhook (if any) each namespace's diagnoses
+	// go to. Built by the caller (see cmd/main.go); nil disables
+	// notifications entirely.
+	NotifyRouter *notify.Router
+
+	// Grouper folds repeated diagnoses with the same (namespace, root
+	// cause) within a window into one notification. Defaulted in
+	// SetupWithManager if nil.
+	Grouper          *alertgroup.Grouper
+	AlertGroupWindow time.Duration
+
+	// EvidenceLimiter bounds how fast the controller hits the apiserver
+	// for evidence (Events search, previous logs) — protects the
+	// apiserver from a self-inflicted request storm when many pods fail
+	// at once. Defaulted in SetupWithManager if nil.
+	EvidenceLimiter *rate.Limiter
+	EvidenceQPS     float64
 }
 
 // +kubebuilder:rbac:groups=diagnostics.poddoctor.dev,resources=poddiagnoses,verbs=get;list;watch;create;update;patch;delete
@@ -77,6 +97,7 @@ type PodDiagnosisReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 
 // failingContainer is one container (init or regular) currently stuck in a
 // trigger reason, alongside the status PodDoctor needs to diagnose it.
@@ -215,12 +236,16 @@ func (r *PodDiagnosisReconciler) reconcileContainer(ctx context.Context, pod *co
 	// ponytail: synchronous, bounded by webhookTimeout — simplest correct
 	// option for one notification per diagnosis; move to an async queue if
 	// webhook latency starts measurably slowing reconciles down.
-	if r.WebhookURL != "" {
-		notifyCtx, cancel := context.WithTimeout(ctx, webhookTimeout)
-		err := notify.Send(notifyCtx, r.WebhookURL, r.WebhookFormat, &diagObj)
-		cancel()
-		if err != nil {
-			logger.V(1).Info("webhook notification failed", "pod", pod.Name, "container", cs.Name, "error", err.Error())
+	if url, format, token, ok := r.NotifyRouter.Route(pod.Namespace); ok {
+		groupKey := pod.Namespace + "/" + string(result.RootCause)
+		if shouldNotify, suppressed := r.Grouper.Observe(groupKey); shouldNotify {
+			notifyCtx, cancel := context.WithTimeout(ctx, webhookTimeout)
+			n := notify.Notification{Diag: &diagObj, Cluster: r.ClusterName, SuppressedCount: suppressed}
+			err := notify.Send(notifyCtx, url, format, token, n)
+			cancel()
+			if err != nil {
+				logger.V(1).Info("webhook notification failed", "pod", pod.Name, "container", cs.Name, "error", err.Error())
+			}
 		}
 	}
 
@@ -236,6 +261,7 @@ func diagnosisName(podName, containerName string) string {
 }
 
 func (r *PodDiagnosisReconciler) gatherEvidence(ctx context.Context, pod *corev1.Pod, cs corev1.ContainerStatus) diagnosis.Evidence {
+	logger := log.FromContext(ctx)
 	ev := diagnosis.Evidence{RestartCount: cs.RestartCount}
 
 	if cs.State.Waiting != nil {
@@ -249,11 +275,48 @@ func (r *PodDiagnosisReconciler) gatherEvidence(ctx context.Context, pod *corev1
 		ev.ExitCode = t.ExitCode
 	}
 
+	// Bounds how fast evidence-gathering hits the apiserver — protects it
+	// from a self-inflicted request storm when a bad rollout crash-loops
+	// many pods at once.
+	if r.EvidenceLimiter != nil {
+		if err := r.EvidenceLimiter.Wait(ctx); err != nil {
+			logger.V(1).Info("evidence rate limiter wait interrupted", "error", err.Error())
+		}
+	}
+
 	ev.RecentEvents = r.recentEvents(ctx, pod)
 	ev.LogTail = r.logTail(ctx, pod, cs.Name)
 	ev.RecentRollout, ev.RolloutContext = r.rolloutContext(ctx, pod)
+	ev.NodePressureConditions, ev.NodeNotReady = r.nodeEvidence(ctx, pod)
 
 	return ev
+}
+
+// nodeEvidence reports abnormal conditions on the pod's node, if any —
+// distinguishing "this container has a bug" from "the node it landed on
+// is under memory/disk/PID pressure or NotReady", which usually affects
+// every pod on that node, not just this one.
+func (r *PodDiagnosisReconciler) nodeEvidence(ctx context.Context, pod *corev1.Pod) (pressures []string, notReady bool) {
+	if pod.Spec.NodeName == "" {
+		return nil, false
+	}
+
+	var node corev1.Node
+	if err := r.Get(ctx, client.ObjectKey{Name: pod.Spec.NodeName}, &node); err != nil {
+		return nil, false
+	}
+
+	for _, cond := range node.Status.Conditions {
+		switch cond.Type {
+		case corev1.NodeMemoryPressure, corev1.NodeDiskPressure, corev1.NodePIDPressure:
+			if cond.Status == corev1.ConditionTrue {
+				pressures = append(pressures, string(cond.Type))
+			}
+		case corev1.NodeReady:
+			notReady = cond.Status != corev1.ConditionTrue
+		}
+	}
+	return pressures, notReady
 }
 
 // recentEvents fetches the newest Kubernetes Events involving this pod,
@@ -471,8 +534,19 @@ func (r *PodDiagnosisReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.RolloutWindow <= 0 {
 		r.RolloutWindow = 10 * time.Minute
 	}
-	if r.WebhookFormat == "" {
-		r.WebhookFormat = notify.FormatGeneric
+	if r.Grouper == nil {
+		window := r.AlertGroupWindow
+		if window <= 0 {
+			window = 2 * time.Minute
+		}
+		r.Grouper = alertgroup.New(window)
+	}
+	if r.EvidenceLimiter == nil {
+		qps := r.EvidenceQPS
+		if qps <= 0 {
+			qps = 20
+		}
+		r.EvidenceLimiter = rate.NewLimiter(rate.Limit(qps), int(qps*2))
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("poddiagnosis").

@@ -36,6 +36,14 @@ type Evidence struct {
 	RecentRollout bool
 	// RolloutContext is a human-readable description of that rollout, if RecentRollout.
 	RolloutContext string
+
+	// NodePressureConditions lists any abnormal Node conditions currently
+	// True on the pod's node (e.g. "MemoryPressure", "DiskPressure",
+	// "PIDPressure") — a hint the failure may be node-wide, not this
+	// container's fault.
+	NodePressureConditions []string
+	// NodeNotReady is true when the pod's node's Ready condition isn't True.
+	NodeNotReady bool
 }
 
 // Result is the operator's determination for one failure episode.
@@ -85,6 +93,17 @@ func Diagnose(ev Evidence) Result {
 	}
 	if len(ev.RecentEvents) == 0 && ev.LogTail == "" && !ev.RecentRollout && res.Confidence == diagv1alpha1.ConfidenceMedium {
 		res.Confidence = diagv1alpha1.ConfidenceLow
+	}
+
+	if len(ev.NodePressureConditions) > 0 {
+		res.Summary = fmt.Sprintf("%s Also: the pod's node reports %s.", res.Summary, strings.Join(ev.NodePressureConditions, ", "))
+		if res.RootCause == diagv1alpha1.RootCauseOOMKilled && containsString(ev.NodePressureConditions, "MemoryPressure") {
+			res.Confidence = diagv1alpha1.ConfidenceHigh
+			res.Recommendation = fmt.Sprintf("%s Node-level MemoryPressure detected — raising this pod's own limits may not help; check node allocatable memory and overall workload density first.", res.Recommendation)
+		}
+	}
+	if ev.NodeNotReady {
+		res.Summary = fmt.Sprintf("%s Also: the pod's node is currently NotReady.", res.Summary)
 	}
 
 	return res
@@ -213,4 +232,13 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func containsString(vals []string, target string) bool {
+	for _, v := range vals {
+		if v == target {
+			return true
+		}
+	}
+	return false
 }

@@ -1,6 +1,7 @@
 package diagnosis
 
 import (
+	"strings"
 	"testing"
 
 	diagv1alpha1 "github.com/chenar/poddoctor/api/v1alpha1"
@@ -109,5 +110,32 @@ func TestDiagnose(t *testing.T) {
 				t.Fatalf("expected confidence to always be set")
 			}
 		})
+	}
+}
+
+func TestDiagnose_NodeMemoryPressureUpgradesOOMKilledConfidence(t *testing.T) {
+	ev := Evidence{
+		HasTerminated:          true,
+		TerminatedReason:       "OOMKilled",
+		ExitCode:               137,
+		NodePressureConditions: []string{"MemoryPressure"},
+	}
+	got := Diagnose(ev)
+	if got.RootCause != diagv1alpha1.RootCauseOOMKilled {
+		t.Fatalf("RootCause = %s, want OOMKilled", got.RootCause)
+	}
+	if got.Confidence != diagv1alpha1.ConfidenceHigh {
+		t.Fatalf("Confidence = %s, want High when node reports MemoryPressure", got.Confidence)
+	}
+	if !strings.Contains(got.Summary, "MemoryPressure") {
+		t.Fatalf("expected summary to mention MemoryPressure, got %q", got.Summary)
+	}
+}
+
+func TestDiagnose_NodeNotReadyNotedInSummary(t *testing.T) {
+	ev := Evidence{HasTerminated: true, ExitCode: 1, NodeNotReady: true}
+	got := Diagnose(ev)
+	if !strings.Contains(got.Summary, "NotReady") {
+		t.Fatalf("expected summary to mention NotReady, got %q", got.Summary)
 	}
 }
