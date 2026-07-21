@@ -53,3 +53,58 @@ spec:
             kind:
               type: string
             metadata:
+              type: object
+            spec:
+              type: object
+              description: |-
+                PodDiagnosisSpec identifies the pod/container this diagnosis covers.
+                PodDiagnosis objects are created and owned by the operator; spec is
+                written once at creation and not intended for user edits.
+              required:
+                - podName
+                - podNamespace
+                - containerName
+              properties:
+                podName:
+                  type: string
+                  description: PodName is the name of the diagnosed Pod.
+                podNamespace:
+                  type: string
+                  description: PodNamespace is the namespace of the diagnosed Pod.
+                containerName:
+                  type: string
+                  description: ContainerName is the container within the Pod that is crash-looping.
+                podUID:
+                  type: string
+                  description: PodUID is the UID of the diagnosed Pod at time of diagnosis.
+            status:
+              type: object
+              description: PodDiagnosisStatus is the diagnosis result, written by the operator.
+              properties:
+                phase:
+                  type: string
+                  enum: [Diagnosing, Diagnosed]
+                  description: "Phase is the diagnosis lifecycle: Diagnosing or Diagnosed."
+                rootCause:
+                  type: string
+                  enum:
+                    - OOMKilled
+                    - ImagePullError
+                    - BadCommand
+                    - SegFault
+                    - SignalKilled
+                    - ProbeFailure
+                    - RecentRolloutRegression
+                    - ApplicationError
+                    - Unknown
+                  description: RootCause is the operator's best determination of why the container is failing.
+                confidence:
+                  type: string
+                  enum: [High, Medium, Low]
+                  description: Confidence indicates how much corroborating evidence backs RootCause.
+                summary:
+                  type: string
+                  description: Summary is a one-line human-readable explanation of the failure.
+                recommendation:
+                  type: string
+                  description: Recommendation is a suggested next step to resolve the failure.
