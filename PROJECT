@@ -1,0 +1,19 @@
+domain: poddoctor.dev
+layout:
+- go.kubebuilder.io/v4
+projectName: poddoctor
+repo: github.com/chenar/poddoctor
+version: "3"
+plugins:
+  manifests.sdk.operatorframework.io/v2: {}
+  scorecard.sdk.operatorframework.io/v2: {}
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: poddoctor.dev
+  group: diagnostics
+  kind: PodDiagnosis
+  path: github.com/chenar/poddoctor/api/v1alpha1
+  version: v1alpha1
