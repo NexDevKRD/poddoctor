@@ -1,0 +1,10 @@
+.git/
+.github/
+charts/
+config/
+hack/
+bin/
+*.md
+cover.out
+coverage.html
+.verify-tmp/
