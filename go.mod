@@ -6,9 +6,9 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/time v0.14.0
-	k8s.io/api v0.36.0
-	k8s.io/apimachinery v0.36.0
-	k8s.io/client-go v0.36.0
+	k8s.io/api v0.36.2
+	k8s.io/apimachinery v0.36.2
+	k8s.io/client-go v0.36.2
 	sigs.k8s.io/controller-runtime v0.24.1
 	sigs.k8s.io/yaml v1.6.0
 )
