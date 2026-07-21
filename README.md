@@ -189,3 +189,99 @@ NAMESPACE   NAME                             POD                              RO
 platform    payments-api-7d4b8f6c9-x2k4p     payments-api-7d4b8f6c9-x2k4p     OOMKilled       High         4          12m
 ```
 
+Short name: `pd`
+
+---
+
+## Configuration
+
+| Helm value | Default | Description |
+|------------|---------|--------------|
+| `replicaCount` | `1` | Set ≥2 with `leaderElection.enabled=true` for HA |
+| `watchNamespace` | `""` (all namespaces) | Restrict the operator's Pod watch to one namespace |
+| `diagnosis.logTailLines` | `50` | Lines of previous-container-instance logs fetched as evidence |
+| `diagnosis.rolloutWindow` | `10m` | How soon after a rollout a pod start still counts as rollout-correlated |
+| `metrics.serviceMonitor.enabled` | `false` | Create a `ServiceMonitor` for the Prometheus Operator |
+| `dashboard.enabled` | `true` | Serve the read-only HTML dashboard (`svc/<release>-dashboard`) |
+| `podDisruptionBudget.enabled` | `false` | Create a PDB (recommended once `replicaCount > 1`) |
+| `installCRDs` | `true` | Render the CRD as part of this release (upgradable; `helm.sh/resource-policy: keep` protects it from `helm uninstall`) |
+
+Full list in [`charts/poddoctor/values.yaml`](charts/poddoctor/values.yaml).
+
+---
+
+## Monitoring
+
+PodDoctor exposes controller-runtime's standard metrics (reconcile count/errors/duration, workqueue depth) on `:8080/metrics` — no custom metrics needed. See [`PRODUCTION.md`](PRODUCTION.md) for ready-to-use `PrometheusRule` alerts.
+
+---
+
+## Development
+
+```bash
+task build          # Build operator binary
+task test            # Run all unit tests
+task test:e2e         # Run E2E suite against a deployed operator
+task docker:build     # Build container image
+task helm:lint         # Lint the Helm chart
+task helm:template     # Render the Helm chart locally
+task helm:install      # helm upgrade --install into current cluster
+task crd:diff           # Fail if the Helm CRD template drifted from config/crd/bases
+task demo               # One command: kind cluster → build → helm install → real crash loops → results
+task demo:clean          # Tear down the demo kind cluster
+task generate             # Regenerate deepcopy methods via controller-gen
+```
+
+See [`TESTING.md`](TESTING.md) for the full test matrix and [`PRODUCTION.md`](PRODUCTION.md) for the production deployment guide.
+
+---
+
+## Project Structure
+
+```
+├── api/v1alpha1/            PodDiagnosis CRD types + hand-maintained deepcopy
+├── cmd/main.go               Operator entrypoint (manager, leader election, flags)
+├── internal/diagnosis/       Pure rule-based root-cause engine (unit tested, no cluster deps)
+├── internal/dashboard/       Small read-only HTML page over PodDiagnosis (stdlib html/template only)
+├── internal/controller/      Reconciler: watches Pods, gathers evidence, writes PodDiagnosis
+├── config/crd/                CRD manifest (kustomize path)
+├── config/rbac/                ServiceAccount, ClusterRole, ClusterRoleBinding
+├── config/manager/              Deployment (kustomize path)
+├── config/samples/               Demo pods that reliably trigger each root cause
+├── charts/poddoctor/              Helm chart (recommended deployment method)
+├── hack/                            E2E test script, boilerplate
+├── Dockerfile                        Multi-stage, distroless, non-root
+├── Taskfile.yaml                      All automation
+└── go.mod
+```
+
+---
+
+## Security Posture
+
+| Property | Detail |
+|----------|--------|
+| Container | Distroless, non-root (UID 65532), read-only fs, drop ALL caps, seccomp `RuntimeDefault` |
+| RBAC | No `secrets` access at all. Read-only on Pods/Events/ReplicaSets/Deployments; write access limited to its own `poddiagnoses` CRD and Events |
+| Network | Only egress is to the Kubernetes API server |
+| HA | `leaderElection.enabled=true` (default), `replicaCount ≥ 2` |
+| Diagnosis engine | Fully offline, rule-based — no external API calls, works air-gapped |
+
+---
+
+## Tech Stack
+
+| Component | Version |
+|-----------|---------|
+| Go | 1.26+ |
+| Kubebuilder layout | go.kubebuilder.io/v4 |
+| controller-runtime | 0.24.1 |
+| Kubernetes client-go | 0.36.0 |
+| Kubernetes | 1.28+ |
+| Helm | 3.12+ |
+
+---
+
+## License
+
+Apache License 2.0
