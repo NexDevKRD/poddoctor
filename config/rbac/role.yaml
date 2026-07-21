@@ -59,6 +59,7 @@ rules:
     resources:
       - replicasets
       - deployments
+      - controllerrevisions
     verbs:
       - get
       - list
