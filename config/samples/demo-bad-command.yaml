@@ -1,0 +1,14 @@
+# Demo: entrypoint references a binary that doesn't exist in the image.
+# PodDoctor should diagnose this as BadCommand (exit 127) with High confidence.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-bad-command
+  labels:
+    app.kubernetes.io/part-of: poddoctor-demo
+spec:
+  restartPolicy: Always
+  containers:
+    - name: app
+      image: busybox:stable
+      command: ["/usr/bin/this-binary-does-not-exist"]
