@@ -121,6 +121,18 @@ tr.detail td {
   padding: 1rem 1.5rem;
 }
 
+.traces-link {
+  display: inline-block;
+  margin-bottom: 0.8rem;
+  color: var(--accent);
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+
+.traces-link:hover {
+  text-decoration: underline;
+}
+
 tr.detail h4 {
   margin: 0 0 0.3rem;
   font-size: 0.75rem;

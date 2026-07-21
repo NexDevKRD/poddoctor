@@ -11,6 +11,7 @@ import (
 
 	"github.com/chenar/poddoctor/internal/notify"
 	"github.com/chenar/poddoctor/internal/severity"
+	"github.com/chenar/poddoctor/internal/tracelink"
 	"github.com/chenar/poddoctor/internal/webui"
 )
 
@@ -25,15 +26,17 @@ type diagnosisStore interface {
 // Server is the fleet hub's HTTP API: an ingest endpoint clusters POST
 // diagnoses to, a JSON list API, and the dashboard SPA over the same data.
 type Server struct {
-	store diagnosisStore
-	token string
+	store   diagnosisStore
+	token   string
+	tracing tracelink.Config
 }
 
 // NewServer builds a Server. An empty token disables auth on every
 // endpoint — fine for local testing, not recommended once reachable from
-// more than one trusted cluster's egress.
-func NewServer(store diagnosisStore, token string) *Server {
-	return &Server{store: store, token: token}
+// more than one trusted cluster's egress. A zero-value tracing Config
+// just omits tracesURL from every record.
+func NewServer(store diagnosisStore, token string, tracing tracelink.Config) *Server {
+	return &Server{store: store, token: token, tracing: tracing}
 }
 
 // Routes returns the hub's http.Handler.
@@ -130,7 +133,8 @@ func filterFromQuery(q url.Values) Filter {
 // TypeScript.
 type apiRecord struct {
 	Diagnosis
-	Severity string `json:"severity"`
+	Severity  string `json:"severity"`
+	TracesURL string `json:"tracesURL,omitempty"`
 }
 
 func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +146,11 @@ func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]apiRecord, 0, len(diags))
 	for _, d := range diags {
-		out = append(out, apiRecord{Diagnosis: d, Severity: severity.Of(d.RootCause)})
+		out = append(out, apiRecord{
+			Diagnosis: d,
+			Severity:  severity.Of(d.RootCause),
+			TracesURL: s.tracing.URL(d.Namespace, d.Pod),
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")

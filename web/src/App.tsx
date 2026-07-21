@@ -23,7 +23,9 @@ function severityCounts(diagnoses: Diagnosis[]) {
 
 function DiagnosisRow({ d, showCluster }: { d: Diagnosis; showCluster: boolean }) {
   const [open, setOpen] = useState(false)
-  const hasDetail = Boolean(d.rolloutContext || d.logExcerpt || (d.recentEvents && d.recentEvents.length > 0))
+  const hasDetail = Boolean(
+    d.rolloutContext || d.logExcerpt || d.tracesURL || (d.recentEvents && d.recentEvents.length > 0),
+  )
 
   return (
     <>
@@ -53,6 +55,11 @@ function DiagnosisRow({ d, showCluster }: { d: Diagnosis; showCluster: boolean }
       {open && (
         <tr className="detail">
           <td colSpan={showCluster ? 7 : 6}>
+            {d.tracesURL && (
+              <a className="traces-link" href={d.tracesURL} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+                View traces in Grafana ↗
+              </a>
+            )}
             {d.rolloutContext && (
               <>
                 <h4>Rollout Context</h4>

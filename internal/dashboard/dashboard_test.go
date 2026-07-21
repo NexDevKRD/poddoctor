@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	diagv1alpha1 "github.com/chenar/poddoctor/api/v1alpha1"
+	"github.com/chenar/poddoctor/internal/tracelink"
 )
 
 func newScheme(t *testing.T) *runtime.Scheme {
@@ -30,7 +31,7 @@ func TestAPIList_EmptyState(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	rec := httptest.NewRecorder()
-	Handler(c).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil))
+	Handler(c, tracelink.Config{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -65,7 +66,7 @@ func TestAPIList_ReturnsDiagnoses(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(diag).Build()
 
 	rec := httptest.NewRecorder()
-	Handler(c).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil))
+	Handler(c, tracelink.Config{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -86,11 +87,39 @@ func TestAPIList_ReturnsDiagnoses(t *testing.T) {
 	}
 }
 
+func TestAPIList_TracesURL(t *testing.T) {
+	diag := &diagv1alpha1.PodDiagnosis{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-oomkilled-app", Namespace: "default"},
+		Spec:       diagv1alpha1.PodDiagnosisSpec{PodName: "demo-oomkilled", PodNamespace: "default", ContainerName: "app"},
+		Status:     diagv1alpha1.PodDiagnosisStatus{RootCause: diagv1alpha1.RootCauseOOMKilled},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(diag).Build()
+
+	rec := httptest.NewRecorder()
+	Handler(c, tracelink.Config{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil))
+	var withoutTracing []apiRecord
+	_ = json.Unmarshal(rec.Body.Bytes(), &withoutTracing)
+	if withoutTracing[0].TracesURL != "" {
+		t.Fatalf("expected no tracesURL when tracing unconfigured, got %q", withoutTracing[0].TracesURL)
+	}
+
+	tracing := tracelink.Config{GrafanaURL: "https://grafana.example.com", TempoDatasourceUID: "uid-1"}
+	rec = httptest.NewRecorder()
+	Handler(c, tracing).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil))
+	var withTracing []apiRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &withTracing); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if withTracing[0].TracesURL == "" {
+		t.Fatalf("expected tracesURL when tracing configured, got empty")
+	}
+}
+
 func TestHandler_ServesStaticAssetsAtRoot(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
 	rec := httptest.NewRecorder()
-	Handler(c).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(c, tracelink.Config{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)

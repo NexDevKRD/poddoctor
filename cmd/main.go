@@ -24,6 +24,7 @@ import (
 	"github.com/chenar/poddoctor/internal/controller"
 	"github.com/chenar/poddoctor/internal/dashboard"
 	"github.com/chenar/poddoctor/internal/notify"
+	"github.com/chenar/poddoctor/internal/tracelink"
 )
 
 var (
@@ -53,6 +54,8 @@ func main() {
 	var evidenceQPS float64
 	var kubeAPIQPS float64
 	var kubeAPIBurst int
+	var grafanaURL string
+	var tempoDatasourceUID string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -85,6 +88,10 @@ func main() {
 		"QPS for the underlying Kubernetes client (watches, writes, RBAC-permitted reads). client-go defaults to 5 if left unset, which throttles a busy controller well below --evidence-qps.")
 	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 100,
 		"Burst for the underlying Kubernetes client, paired with --kube-api-qps.")
+	flag.StringVar(&grafanaURL, "grafana-url", "",
+		"Base URL of a Grafana instance with a Tempo datasource, for a \"View Traces\" link on each diagnosis. Requires --tempo-datasource-uid too. PodDoctor doesn't collect or store traces itself.")
+	flag.StringVar(&tempoDatasourceUID, "tempo-datasource-uid", "",
+		"UID of the Tempo datasource in Grafana (Grafana admin > Connections > Data sources). Required alongside --grafana-url for trace links.")
 
 	opts := zap.Options{
 		Development: true,
@@ -163,9 +170,10 @@ func main() {
 	}
 
 	if dashboardAddr != "0" {
+		tracing := tracelink.Config{GrafanaURL: grafanaURL, TempoDatasourceUID: tempoDatasourceUID}
 		srv := &http.Server{
 			Addr:              dashboardAddr,
-			Handler:           dashboard.Handler(mgr.GetAPIReader()),
+			Handler:           dashboard.Handler(mgr.GetAPIReader(), tracing),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      10 * time.Second,

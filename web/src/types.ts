@@ -17,4 +17,5 @@ export interface Diagnosis {
   suppressedCount?: number
   lastObserved?: string
   receivedAt?: string
+  tracesURL?: string
 }

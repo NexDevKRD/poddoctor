@@ -14,6 +14,7 @@ import (
 
 	diagv1alpha1 "github.com/chenar/poddoctor/api/v1alpha1"
 	"github.com/chenar/poddoctor/internal/severity"
+	"github.com/chenar/poddoctor/internal/tracelink"
 	"github.com/chenar/poddoctor/internal/webui"
 )
 
@@ -34,20 +35,22 @@ type apiRecord struct {
 	LogExcerpt     string   `json:"logExcerpt,omitempty"`
 	RecentEvents   []string `json:"recentEvents,omitempty"`
 	LastObserved   string   `json:"lastObserved"`
+	TracesURL      string   `json:"tracesURL,omitempty"`
 }
 
 // Handler returns the dashboard's http.Handler: the SPA's static assets at
 // "/" and its data at "/api/diagnoses", read through reader. Pass
 // mgr.GetAPIReader() so the page works immediately (no wait for the
-// manager's cache to sync).
-func Handler(reader client.Reader) http.Handler {
+// manager's cache to sync). tracing is optional — a zero-value
+// tracelink.Config just omits tracesURL from every record.
+func Handler(reader client.Reader, tracing tracelink.Config) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/diagnoses", handleAPIList(reader))
+	mux.HandleFunc("/api/diagnoses", handleAPIList(reader, tracing))
 	mux.Handle("/", webui.Handler())
 	return mux
 }
 
-func handleAPIList(reader client.Reader) http.HandlerFunc {
+func handleAPIList(reader client.Reader, tracing tracelink.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var list diagv1alpha1.PodDiagnosisList
 		if err := reader.List(r.Context(), &list); err != nil {
@@ -86,6 +89,7 @@ func handleAPIList(reader client.Reader) http.HandlerFunc {
 				LogExcerpt:     d.Status.LogExcerpt,
 				RecentEvents:   events,
 				LastObserved:   lastObserved,
+				TracesURL:      tracing.URL(d.Namespace, d.Spec.PodName),
 			})
 		}
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/chenar/poddoctor/internal/notify"
+	"github.com/chenar/poddoctor/internal/tracelink"
 )
 
 type fakeStore struct {
@@ -30,7 +31,7 @@ func (f *fakeStore) Ping(_ context.Context) error { return f.pingErr }
 
 func TestIngest_StoresPayload(t *testing.T) {
 	fs := &fakeStore{}
-	srv := NewServer(fs, "")
+	srv := NewServer(fs, "", tracelink.Config{})
 
 	body, _ := json.Marshal(notify.Payload{
 		Cluster: "us-east-1", Namespace: "payments", Pod: "api-1", Container: "app",
@@ -54,7 +55,7 @@ func TestIngest_StoresPayload(t *testing.T) {
 
 func TestIngest_RejectsMissingFields(t *testing.T) {
 	fs := &fakeStore{}
-	srv := NewServer(fs, "")
+	srv := NewServer(fs, "", tracelink.Config{})
 
 	body, _ := json.Marshal(notify.Payload{Cluster: "us-east-1"}) // no namespace/pod
 	req := httptest.NewRequest(http.MethodPost, "/ingest", bytes.NewReader(body))
@@ -70,7 +71,7 @@ func TestIngest_RejectsMissingFields(t *testing.T) {
 }
 
 func TestIngest_RejectsGet(t *testing.T) {
-	srv := NewServer(&fakeStore{}, "")
+	srv := NewServer(&fakeStore{}, "", tracelink.Config{})
 	req := httptest.NewRequest(http.MethodGet, "/ingest", nil)
 	w := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(w, req)
@@ -81,7 +82,7 @@ func TestIngest_RejectsGet(t *testing.T) {
 }
 
 func TestAuth_RequiresBearerTokenWhenSet(t *testing.T) {
-	srv := NewServer(&fakeStore{}, "s3cr3t")
+	srv := NewServer(&fakeStore{}, "s3cr3t", tracelink.Config{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil)
 	w := httptest.NewRecorder()
@@ -100,7 +101,7 @@ func TestAuth_RequiresBearerTokenWhenSet(t *testing.T) {
 }
 
 func TestAuth_DisabledWhenTokenEmpty(t *testing.T) {
-	srv := NewServer(&fakeStore{}, "")
+	srv := NewServer(&fakeStore{}, "", tracelink.Config{})
 	req := httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil)
 	w := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(w, req)
@@ -113,7 +114,7 @@ func TestAPIList_ReturnsJSON(t *testing.T) {
 	fs := &fakeStore{listResult: []Diagnosis{
 		{Cluster: "us-east-1", Namespace: "payments", Pod: "api-1", RootCause: "OOMKilled"},
 	}}
-	srv := NewServer(fs, "")
+	srv := NewServer(fs, "", tracelink.Config{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/diagnoses?cluster=us-east-1", nil)
 	w := httptest.NewRecorder()
@@ -132,7 +133,7 @@ func TestAPIList_ReturnsJSON(t *testing.T) {
 }
 
 func TestRoot_ServesDashboardSPA(t *testing.T) {
-	srv := NewServer(&fakeStore{}, "")
+	srv := NewServer(&fakeStore{}, "", tracelink.Config{})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -144,7 +145,7 @@ func TestRoot_ServesDashboardSPA(t *testing.T) {
 }
 
 func TestRoot_RequiresAuthWhenTokenSet(t *testing.T) {
-	srv := NewServer(&fakeStore{}, "s3cr3t")
+	srv := NewServer(&fakeStore{}, "s3cr3t", tracelink.Config{})
 
 	w := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -157,7 +158,7 @@ func TestAPIList_IncludesSeverity(t *testing.T) {
 	fs := &fakeStore{listResult: []Diagnosis{
 		{Cluster: "us-east-1", Namespace: "payments", Pod: "api-1", RootCause: "OOMKilled"},
 	}}
-	srv := NewServer(fs, "")
+	srv := NewServer(fs, "", tracelink.Config{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil)
 	w := httptest.NewRecorder()
@@ -172,8 +173,27 @@ func TestAPIList_IncludesSeverity(t *testing.T) {
 	}
 }
 
+func TestAPIList_TracesURL(t *testing.T) {
+	fs := &fakeStore{listResult: []Diagnosis{
+		{Cluster: "us-east-1", Namespace: "payments", Pod: "api-1", RootCause: "OOMKilled"},
+	}}
+	srv := NewServer(fs, "", tracelink.Config{GrafanaURL: "https://grafana.example.com", TempoDatasourceUID: "uid-1"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnoses", nil)
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, req)
+
+	var got []apiRecord
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != 1 || got[0].TracesURL == "" {
+		t.Fatalf("expected tracesURL to be set, got: %+v", got)
+	}
+}
+
 func TestHealthzReadyz(t *testing.T) {
-	srv := NewServer(&fakeStore{}, "")
+	srv := NewServer(&fakeStore{}, "", tracelink.Config{})
 
 	w := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -189,7 +209,7 @@ func TestHealthzReadyz(t *testing.T) {
 }
 
 func TestReadyz_FailsWhenDBUnreachable(t *testing.T) {
-	srv := NewServer(&fakeStore{pingErr: context.DeadlineExceeded}, "")
+	srv := NewServer(&fakeStore{pingErr: context.DeadlineExceeded}, "", tracelink.Config{})
 	w := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if w.Code != http.StatusServiceUnavailable {
