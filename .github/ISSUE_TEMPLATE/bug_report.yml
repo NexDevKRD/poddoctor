@@ -1,0 +1,41 @@
+name: Bug report
+description: Something isn't working as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Pod/Deployment manifest, or steps, that trigger it
+      render: yaml
+
+  - type: textarea
+    id: diagnosis
+    attributes:
+      label: Relevant PodDiagnosis / logs
+      description: Output of `kubectl get pd -A`, `kubectl describe pd <name>`, and/or `kubectl logs -n poddoctor-system deployment/poddoctor`
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: PodDoctor version
+      placeholder: v0.1.0 or image tag/digest
+    validations:
+      required: true
+
+  - type: input
+    id: k8s-version
+    attributes:
+      label: Kubernetes version
+      placeholder: 1.30.2
+    validations:
+      required: true
